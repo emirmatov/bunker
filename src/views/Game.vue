@@ -68,7 +68,7 @@ const showKickAnim   = ref(false)
 const kickAnimName   = ref('')
 const kickAnimIsSelf = ref(false)
 let   kickAnimTimer  = null
-
+const isPassActionPending = ref(false)
 let playersLoaded = false
 const knownDeadUids = new Set()
 
@@ -286,18 +286,34 @@ const keepRoundOnTimeout = reason === 'timeout'
 
 const requestTurnSkip = async () => {
   if (!isMyTurn.value) return
-  await updateDoc(doc(db, 'rooms', roomId, 'players', myUid.value), {
-    turnSkipRequestAt: Timestamp.now(),
-  })
-  toast.add({ severity: 'info', summary: '⏭️ Запрос отправлен', detail: 'Хост завершит ваш ход', life: 1800 })
+  try {
+    await updateDoc(doc(db, 'rooms', roomId, 'players', myUid.value), {
+      turnSkipRequestAt: Timestamp.now(),
+    })
+    toast.add({ severity: 'info', summary: '⏭️ Запрос отправлен', detail: 'Хост завершит ваш ход', life: 1800 })
+  } catch (e) {
+    isPassActionPending.value = false
+    toast.add({ severity: 'error', summary: 'Ошибка', detail: 'Не удалось отправить запрос скипа', life: 2200 })
+  }
 }
 
 const onPassTurnClick = async () => {
+  if (isPassActionPending.value) return
+  isPassActionPending.value = true
+
   if (isMyTurn.value && !me.value?.isHost) {
     await requestTurnSkip()
     return
   }
-  await passTurn()
+  try {
+    if (!isMyTurn.value && me.value?.isHost) {
+      await passTurn({ force: true, reason: 'host_skip' })
+      return
+    }
+    await passTurn({ reason: 'self' })
+  } finally {
+    isPassActionPending.value = false
+  }
 }
 
 // ─── Кик игрока ──────────────────────────────────────────────
@@ -358,6 +374,12 @@ watch(activePlayerId, async (newId) => {
     await setTurnTimer()
   }
 })
+watch([isMyTurn, () => room.value?.status], ([myTurn, status]) => {
+  if (!myTurn || status !== 'playing') {
+    isPassActionPending.value = false
+  }
+})
+
 let skipRequestInFlight = false
 watch(
   () => activePlayer.value?.turnSkipRequestAt?.toMillis?.() ?? null,
