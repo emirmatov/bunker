@@ -1,75 +1,75 @@
 <script setup>
-import { ref } from 'vue'
+import { ref, onMounted } from 'vue'
 import { useRouter } from 'vue-router'
 import { db, auth } from '../firebase'
 import { doc, setDoc, getDoc } from 'firebase/firestore'
-import { onAuthStateChanged } from 'firebase/auth'
+import { signInAnonymously, onAuthStateChanged } from 'firebase/auth'
 
-// PrimeVue компоненты
-import Button from 'primevue/button'
+import Button    from 'primevue/button'
 import InputText from 'primevue/inputtext'
 import { useToast } from 'primevue/usetoast'
-import Toast from 'primevue/toast'
+import { useGameStore } from '../stores/game'
 
-const router = useRouter()
-const toast = useToast()
+const router  = useRouter()
+const toast   = useToast()
+const store   = useGameStore()
 
-const playerName = ref('')
-const joinCode = ref('')
-const loading = ref(false)
-const errorMsg = ref('')
+const playerName = ref(store.savedName)
+const joinCode   = ref('')
+const loading    = ref(false)
 
-// ─────────────────────────────────────────────────────────
-// Утилиты
-// ─────────────────────────────────────────────────────────
+// ─── Утилиты ──────────────────────────────────────────────────────
 
-// Генерация кода: всегда ровно 6 символов, только A-Z0-9
 const generateRoomId = () => {
-  const chars = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789' // без похожих I/1/O/0
+  const chars = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789' // убраны I/1/O/0
   return Array.from({ length: 6 }, () => chars[Math.floor(Math.random() * chars.length)]).join('')
 }
 
-// Ожидаем инициализацию Firebase Auth перед любым запросом
-const waitForAuth = () =>
-  new Promise((resolve, reject) =>
-    onAuthStateChanged(auth, user => (user ? resolve(user) : reject(new Error('Не авторизован'))), reject)
-  )
+/** Гарантирует анонимного пользователя. Повторно использует существующий, если есть. */
+const ensureUser = () =>
+  new Promise((resolve, reject) => {
+    const unsub = onAuthStateChanged(auth, async (user) => {
+      unsub()
+      if (user) return resolve(user)
+      try {
+        const cred = await signInAnonymously(auth)
+        resolve(cred.user)
+      } catch (e) {
+        reject(e)
+      }
+    })
+  })
 
-const showError = (msg) => {
-  errorMsg.value = msg
+const showError = (msg) =>
   toast.add({ severity: 'error', summary: 'Ошибка', detail: msg, life: 4000 })
-}
 
-// ─────────────────────────────────────────────────────────
-// Создание комнаты (Хост)
-// ─────────────────────────────────────────────────────────
+const normCode = () => joinCode.value.replace(/\s/g, '').toUpperCase()
+
+// ─── Создание комнаты ─────────────────────────────────────────────
 const createGame = async () => {
-  if (!playerName.value.trim()) return showError('Введите ваш позывной')
+  const name = playerName.value.trim()
+  if (!name) return showError('Введите ваш позывной')
 
   loading.value = true
-  errorMsg.value = ''
-
   try {
-    const user = await waitForAuth()
+    const user   = await ensureUser()
     const roomId = generateRoomId()
 
-    // Создаём документ комнаты
     await setDoc(doc(db, 'rooms', roomId), {
-      status: 'lobby',
-      createdAt: new Date(),
-      hostId: user.uid,
+      status:       'lobby',
+      createdAt:    new Date(),
+      hostId:       user.uid,
       currentRound: 1,
     })
-
-    // Добавляем хоста как первого игрока
     await setDoc(doc(db, 'rooms', roomId, 'players', user.uid), {
-      name: playerName.value.trim(),
-      isHost: true,
-      uid: user.uid,
+      name,
+      isHost:   true,
+      uid:      user.uid,
       joinedAt: new Date(),
     })
 
-    router.push(`/lobby/${roomId}`)
+    store.setName(name)
+    router.push({ name: 'lobby', params: { id: roomId } })
   } catch (e) {
     console.error('Ошибка при создании комнаты:', e)
     showError('Не удалось создать комнату. Проверьте соединение.')
@@ -78,54 +78,48 @@ const createGame = async () => {
   }
 }
 
-// ─────────────────────────────────────────────────────────
-// Вход в комнату (Гость)
-// ─────────────────────────────────────────────────────────
+// ─── Вход в комнату ───────────────────────────────────────────────
 const joinGame = async () => {
-  if (!playerName.value.trim()) return showError('Введите ваш позывной')
+  const name = playerName.value.trim()
+  if (!name) return showError('Введите ваш позывной')
 
-  const code = joinCode.value.replace(/\s/g, '').toUpperCase()
-  if (!code) return showError('Введите код комнаты')
+  const code = normCode()
+  if (!code)        return showError('Введите код комнаты')
   if (code.length !== 6) return showError('Код должен состоять из 6 символов')
 
   loading.value = true
-  errorMsg.value = ''
-
   try {
-    const user = await waitForAuth()
-
-    // 1. Проверяем существование комнаты
-    const roomRef = doc(db, 'rooms', code)
+    const user     = await ensureUser()
+    const roomRef  = doc(db, 'rooms', code)
     const roomSnap = await getDoc(roomRef)
 
-    if (!roomSnap.exists()) {
+    if (!roomSnap.exists())
       return showError('Комната с таким кодом не найдена')
-    }
 
-    // 2. Проверяем статус — нельзя входить в уже начатую игру
     const roomData = roomSnap.data()
-    if (roomData.status !== 'lobby') {
+    if (roomData.status !== 'lobby')
       return showError('Игра уже началась. Войти нельзя.')
-    }
 
-    // 3. Проверяем, не в комнате ли игрок уже
-    const playerRef = doc(db, 'rooms', code, 'players', user.uid)
+    // Проверяем лимит (не более 12 игроков)
+    const { getDocs, collection } = await import('firebase/firestore')
+    const snap = await getDocs(collection(db, 'rooms', code, 'players'))
+    if (snap.size >= 12)
+      return showError('Комната заполнена (максимум 12 игроков)')
+
+    const playerRef  = doc(db, 'rooms', code, 'players', user.uid)
     const playerSnap = await getDoc(playerRef)
 
-    if (playerSnap.exists()) {
-      // Игрок уже в комнате — просто перенаправляем
-      return router.push(`/lobby/${code}`)
+    if (!playerSnap.exists()) {
+      await setDoc(playerRef, {
+        name,
+        isHost:   false,
+        uid:      user.uid,
+        joinedAt: new Date(),
+      })
     }
 
-    // 4. Добавляем нового игрока
-    await setDoc(playerRef, {
-      name: playerName.value.trim(),
-      isHost: false,
-      uid: user.uid,
-      joinedAt: new Date(),
-    })
-
-    router.push(`/lobby/${code}`)
+    store.setName(name)
+    router.push({ name: 'lobby', params: { id: code } })
   } catch (e) {
     console.error('Ошибка при входе в комнату:', e)
     showError('Не удалось войти в комнату. Проверьте соединение.')
@@ -133,22 +127,22 @@ const joinGame = async () => {
     loading.value = false
   }
 }
+
+const onEnter = () => normCode() ? joinGame() : createGame()
 </script>
 
 <template>
   <div class="home-container">
-    <!-- PrimeVue Toast для ошибок -->
-    <Toast position="top-center" />
-
     <div class="hero">
-      <h1>☢️ БУНКЕР</h1>
-      <p>Конец света близок. Спасутся не все.</p>
+      <div class="hero-icon">☢️</div>
+      <h1>БУНКЕР</h1>
+      <p class="hero-sub">Конец света близок. Спасутся не все.</p>
     </div>
 
     <div class="form-card">
       <!-- Имя игрока -->
       <div class="input-group">
-        <label for="name-input">Ваш позывной (Имя)</label>
+        <label for="name-input">Ваш позывной</label>
         <InputText
           id="name-input"
           v-model="playerName"
@@ -156,32 +150,30 @@ const joinGame = async () => {
           class="w-full"
           :disabled="loading"
           maxlength="20"
-          @keyup.enter="joinCode ? joinGame() : createGame()"
+          @keyup.enter="onEnter"
         />
       </div>
 
       <!-- Создать -->
-      <div class="action-block">
-        <Button
-          label="Создать бункер"
-          severity="danger"
-          class="w-full"
-          :loading="loading"
-          @click="createGame"
-        />
-      </div>
+      <Button
+        label="Создать бункер"
+        severity="danger"
+        class="w-full"
+        :loading="loading"
+        icon="pi pi-plus"
+        @click="createGame"
+      />
 
-      <div class="or-divider">ИЛИ</div>
+      <div class="or-divider"><span>ИЛИ</span></div>
 
       <!-- Войти -->
-      <div class="action-block join-block">
+      <div class="join-block">
         <InputText
           v-model="joinCode"
           placeholder="Код комнаты (напр. K8X2W3)"
-          class="w-full text-center"
+          class="w-full code-input"
           :disabled="loading"
           maxlength="6"
-          style="text-transform:uppercase; letter-spacing:4px"
           @keyup.enter="joinGame"
         />
         <Button
@@ -189,13 +181,13 @@ const joinGame = async () => {
           severity="secondary"
           class="w-full"
           :loading="loading"
+          icon="pi pi-sign-in"
           @click="joinGame"
         />
       </div>
-
-      <!-- Инлайн-ошибка (дублирует Toast) -->
-      <p v-if="errorMsg" class="error-msg">⚠ {{ errorMsg }}</p>
     </div>
+
+    <p class="footer-note">Анонимная игра — никакой регистрации</p>
   </div>
 </template>
 
@@ -206,65 +198,86 @@ const joinGame = async () => {
   align-items: center;
   justify-content: center;
   min-height: 100vh;
-  padding: 1rem;
+  padding: 1.5rem;
+  background: radial-gradient(ellipse at 50% 0%, rgba(229,62,62,0.08) 0%, transparent 70%);
 }
 
-.hero {
-  text-align: center;
-  margin-bottom: 3rem;
+/* Герой */
+.hero { text-align: center; margin-bottom: 2.5rem; }
+
+.hero-icon {
+  font-size: 4rem;
+  margin-bottom: 0.5rem;
+  filter: drop-shadow(0 0 20px rgba(229,62,62,0.6));
+  animation: float 3s ease-in-out infinite;
+}
+@keyframes float {
+  0%, 100% { transform: translateY(0); }
+  50%       { transform: translateY(-8px); }
 }
 
 .hero h1 {
-  font-size: 3rem;
+  font-size: clamp(2.5rem, 8vw, 4rem);
+  color: var(--color-accent);
+  text-shadow: 0 0 30px rgba(229,62,62,0.4);
   margin-bottom: 0.5rem;
-  color: #ff5252;
 }
 
+.hero-sub {
+  color: var(--color-muted);
+  font-size: 1rem;
+}
+
+/* Карточка формы */
 .form-card {
-  background: #2a2a2a;
+  background: var(--color-surface);
   padding: 2rem;
-  border-radius: 12px;
+  border-radius: var(--radius-lg);
   width: 100%;
-  max-width: 400px;
-  box-shadow: 0 10px 30px rgba(0, 0, 0, 0.5);
+  max-width: 420px;
+  box-shadow: var(--shadow-card), 0 0 0 1px var(--color-border);
+  display: flex;
+  flex-direction: column;
+  gap: 0.75rem;
 }
 
 .input-group {
   display: flex;
   flex-direction: column;
-  gap: 0.5rem;
-  margin-bottom: 1.5rem;
+  gap: 0.4rem;
+  margin-bottom: 0.25rem;
 }
-
-.input-group label {
-  color: #aaa;
-  font-size: 0.9rem;
-}
-
-.w-full { width: 100%; }
-.text-center { text-align: center; }
-
-.action-block {
-  margin-bottom: 0.5rem;
-}
-
-.join-block {
-  display: flex;
-  flex-direction: column;
-  gap: 0.5rem;
-}
+.input-group label { color: var(--color-muted); font-size: 0.85rem; }
 
 .or-divider {
-  text-align: center;
-  color: #666;
-  font-size: 0.9rem;
-  margin: 1.25rem 0;
+  display: flex;
+  align-items: center;
+  gap: 0.75rem;
+  color: var(--color-muted);
+  font-size: 0.8rem;
+  margin: 0.25rem 0;
+}
+.or-divider::before,
+.or-divider::after {
+  content: '';
+  flex: 1;
+  height: 1px;
+  background: var(--color-border);
 }
 
-.error-msg {
-  margin-top: 1rem;
-  color: #ff5252;
-  font-size: 0.85rem;
+.join-block { display: flex; flex-direction: column; gap: 0.5rem; }
+
+.code-input :deep(input) {
+  text-transform: uppercase;
+  letter-spacing: 6px;
   text-align: center;
+  font-weight: 700;
+  font-size: 1.1rem;
+}
+
+.footer-note {
+  margin-top: 1.5rem;
+  color: #444;
+  font-size: 0.75rem;
 }
 </style>
