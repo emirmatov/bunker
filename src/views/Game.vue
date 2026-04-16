@@ -104,7 +104,7 @@ const syncTimer = () => {
   if (!end) { timerSeconds.value = room.value.timerDuration; return }
   timerSeconds.value = Math.max(0, Math.ceil((end - Date.now()) / 1000))
   if (timerSeconds.value === 0 && me.value?.isHost && room.value?.status === 'playing' && activePlayerId.value) {
-    passTurn()
+    passTurn({ force: true, reason: 'timeout' })
   }
 }
 
@@ -168,7 +168,13 @@ const deadPlayers    = computed(() => players.value.filter(p => p.isAlive === fa
 const isVoting         = computed(() => room.value?.status === 'voting')
 const myVote           = computed(() => room.value?.votes?.[myUid.value])
 const activePlayerId   = computed(() => room.value?.activePlayerId)
+const activePlayer     = computed(() => players.value.find(p => p.uid === activePlayerId.value) || null)
 const isMyTurn         = computed(() => activePlayerId.value === myUid.value && me.value?.isAlive !== false)
+const canPassTurn      = computed(() =>
+  room.value?.status === 'playing' &&
+  !!activePlayerId.value &&
+  (isMyTurn.value || me.value?.isHost)
+)
 const activePlayerName = computed(() =>
   players.value.find(p => p.uid === activePlayerId.value)?.name || 'Никто'
 )
@@ -235,16 +241,35 @@ const startFirstTurn = async () => {
   }
 }
 
-const passTurn = async () => {
-  if (!isMyTurn.value) return
+const passTurn = async ({ force = false, reason = null } = {}) => {
+  if (room.value?.status !== 'playing' || !activePlayerId.value) return
+  const amActivePlayer = activePlayerId.value === myUid.value
+  const canControlTurn = amActivePlayer || me.value?.isHost
+  if (!canControlTurn || (!force && !amActivePlayer)) return
   const sorted = [...alivePlayers.value].sort((a, b) => a.uid.localeCompare(b.uid))
-  const idx    = sorted.findIndex(p => p.uid === myUid.value)
+  const idx    = sorted.findIndex(p => p.uid === activePlayerId.value)
+  if (idx < 0) return
   let next = null
   for (let i = 1; i <= sorted.length; i++) {
     const candidate = sorted[(idx + i) % sorted.length]
     if (!candidate.isMuted) { next = candidate; break }
   }
-  const isEndOfRound = !next || next.uid === myUid.value || idx === sorted.length - 1
+const keepRoundOnTimeout = reason === 'timeout'
+  const isEndOfRound =
+    !next ||
+    next.uid === activePlayerId.value ||
+    (!keepRoundOnTimeout && idx === sorted.length - 1)
+
+  if (reason === 'timeout') {
+    const timedOutPlayer = players.value.find(p => p.uid === activePlayerId.value)
+    if (timedOutPlayer) await logEvent(`⏰ Время хода ${timedOutPlayer.name} вышло — ход пропущен`)
+  } else if (reason === 'player_request') {
+    const requestedBy = players.value.find(p => p.uid === activePlayerId.value)
+    if (requestedBy) await logEvent(`⏭️ ${requestedBy.name} завершил ход`)
+  } else if (reason === 'host_skip') {
+    const skippedPlayer = players.value.find(p => p.uid === activePlayerId.value)
+    if (skippedPlayer) await logEvent(`🧑‍✈️ Хост пропустил ход игрока ${skippedPlayer.name}`)
+  }
   if (isEndOfRound) {
     const maxSeats = room.value?.bunkerSize || 2
     if (alivePlayers.value.length <= maxSeats) {
@@ -257,6 +282,22 @@ const passTurn = async () => {
     await updateDoc(doc(db, 'rooms', roomId), { activePlayerId: next.uid })
     await setTurnTimer()
   }
+}
+
+const requestTurnSkip = async () => {
+  if (!isMyTurn.value) return
+  await updateDoc(doc(db, 'rooms', roomId, 'players', myUid.value), {
+    turnSkipRequestAt: Timestamp.now(),
+  })
+  toast.add({ severity: 'info', summary: '⏭️ Запрос отправлен', detail: 'Хост завершит ваш ход', life: 1800 })
+}
+
+const onPassTurnClick = async () => {
+  if (isMyTurn.value && !me.value?.isHost) {
+    await requestTurnSkip()
+    return
+  }
+  await passTurn()
 }
 
 // ─── Кик игрока ──────────────────────────────────────────────
@@ -317,7 +358,23 @@ watch(activePlayerId, async (newId) => {
     await setTurnTimer()
   }
 })
+let skipRequestInFlight = false
+watch(
+  () => activePlayer.value?.turnSkipRequestAt?.toMillis?.() ?? null,
+  async (requestTs) => {
+    if (!me.value?.isHost || !activePlayerId.value || room.value?.status !== 'playing') return
+    if (!requestTs || skipRequestInFlight) return
 
+    skipRequestInFlight = true
+    try {
+      const activeUid = activePlayerId.value
+      await updateDoc(doc(db, 'rooms', roomId, 'players', activeUid), { turnSkipRequestAt: null })
+      await passTurn({ force: true, reason: 'player_request' })
+    } finally {
+      skipRequestInFlight = false
+    }
+  }
+)
 // Подсчёт голосов
 watch(() => room.value?.votes, async (newVotes) => {
   if (!me.value?.isHost || room.value?.status !== 'voting' || !newVotes) return
@@ -786,6 +843,7 @@ const restartGame = async () => {
       isAlive: true,
       hasImmunity: false, hasDoubleVote: false, isMuted: false,
       specialBlocked: false, hasNoVote: false, forcedVoteBy: false, specialShield: false,
+      turnSkipRequestAt: null,
       cards: {
         profession:    { value: deckP[i],    isRevealed: false },
         biology:       { value: deckB[i],    isRevealed: false },
@@ -1051,7 +1109,14 @@ const restartGame = async () => {
 
           <div class="turn-actions">
             <Button v-if="me.isHost && !activePlayerId" label="Начать игру" severity="warning" size="large" icon="pi pi-play" @click="startFirstTurn" />
-            <Button v-if="isMyTurn" label="Завершить ход" severity="success" icon="pi pi-check" size="large" @click="passTurn" />
+            <Button
+              v-if="canPassTurn"
+              :label="isMyTurn ? 'Завершить ход' : 'Пропустить ход игрока'"
+              severity="success"
+              icon="pi pi-check"
+              size="large"
+              @click="onPassTurnClick"
+            />
           </div>
         </div>
 

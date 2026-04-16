@@ -120,6 +120,7 @@ const startGame = async () => {
         isAlive: true,
         hasImmunity: false, hasDoubleVote: false, isMuted: false,
         specialBlocked: false, hasNoVote: false, forcedVoteBy: false, specialShield: false,
+        turnSkipRequestAt: null,
       })
     }
     await updateDoc(doc(db, 'rooms', roomId), {
