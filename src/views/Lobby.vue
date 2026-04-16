@@ -14,7 +14,7 @@ import {
 import Button from 'primevue/button'
 import Tag    from 'primevue/tag'
 import { useToast } from 'primevue/usetoast'
-
+defineOptions({ name: 'LobbyView' })
 const route  = useRoute()
 const router = useRouter()
 const toast  = useToast()

@@ -12,13 +12,12 @@ import {
   hobbies, specialCards, shuffleArray, getRandomItem
 } from '../gameData'
 
-import Card   from 'primevue/card'
 import Button from 'primevue/button'
 import Tag    from 'primevue/tag'
 import Panel  from 'primevue/panel'
 import Dialog from 'primevue/dialog'
 import { useToast } from 'primevue/usetoast'
-
+defineOptions({ name: 'GameView' })
 const route  = useRoute()
 const router = useRouter()
 const toast  = useToast()
@@ -372,7 +371,11 @@ const showSpecialDialog   = ref(false)
 const selectedSpecialCard = ref(null)
 
 const playSound = (name) => {
-  try { new Audio(`/${name}.mp3`).play() } catch {}
+  try {
+    new Audio(`/${name}.mp3`).play()
+  } catch (e) {
+    console.error('[playSound]', e)
+  }
 }
 
 const revealCard = async (key, data, event) => {

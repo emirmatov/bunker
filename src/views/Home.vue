@@ -1,5 +1,5 @@
 <script setup>
-import { ref, onMounted } from 'vue'
+import { ref } from 'vue'
 import { useRouter } from 'vue-router'
 import { db, auth } from '../firebase'
 import { doc, setDoc, getDoc } from 'firebase/firestore'
@@ -9,7 +9,7 @@ import Button    from 'primevue/button'
 import InputText from 'primevue/inputtext'
 import { useToast } from 'primevue/usetoast'
 import { useGameStore } from '../stores/game'
-
+defineOptions({ name: 'HomeView' })
 const router  = useRouter()
 const toast   = useToast()
 const store   = useGameStore()
