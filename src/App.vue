@@ -1,25 +1,29 @@
 <script setup>
-import { RouterView } from 'vue-router'
+import { computed } from 'vue'
+import { RouterView, useRoute } from 'vue-router'
 import Toast from 'primevue/toast'
-import { useGameStore } from './stores/game'
-import { onMounted } from 'vue'
+import AppHeader from './components/layout/AppHeader.vue'
+import AppFooter from './components/layout/AppFooter.vue'
 
-const store = useGameStore()
-
-// Инициализируем анонимную аутентификацию при старте приложения
-onMounted(() => store.initAuth())
+const route = useRoute()
+// На /game и /lobby прячем хедер+футер — там полноэкранный интерфейс
+const hideChrome = computed(() => !!route.meta?.hideChrome)
 </script>
 
 <template>
   <Toast position="top-center" :breakpoints="{ '640px': { width: '90vw' } }" />
-  <RouterView />
+  <div class="app-shell">
+    <AppHeader v-if="!hideChrome" />
+    <main class="app-main">
+      <RouterView />
+    </main>
+    <AppFooter v-if="!hideChrome" />
+  </div>
 </template>
 
 <style>
-/* Подключаем шрифт */
 @import url('https://fonts.googleapis.com/css2?family=Russo+One&family=Inter:wght@400;500;600;700&display=swap');
 
-/* CSS-переменные темы */
 :root {
   --color-bg:         #0f0f0f;
   --color-surface:    #1a1a1a;
@@ -37,17 +41,8 @@ onMounted(() => store.initAuth())
   --shadow-card:      0 4px 24px rgba(0, 0, 0, 0.6);
 }
 
-/* Сброс */
-*, *::before, *::after {
-  box-sizing: border-box;
-  margin: 0;
-  padding: 0;
-}
-
-html, body {
-  height: 100%;
-}
-
+*, *::before, *::after { box-sizing: border-box; margin: 0; padding: 0; }
+html, body { height: 100%; }
 body {
   background-color: var(--color-bg);
   color: var(--color-text);
@@ -57,19 +52,16 @@ body {
   -webkit-font-smoothing: antialiased;
 }
 
-/* Скроллбар */
 ::-webkit-scrollbar        { width: 6px; }
 ::-webkit-scrollbar-track  { background: var(--color-surface); }
 ::-webkit-scrollbar-thumb  { background: #444; border-radius: 3px; }
 ::-webkit-scrollbar-thumb:hover { background: #666; }
 
-/* Заголовки — шрифт бункера */
-h1, h2, h3 {
-  font-family: 'Russo One', sans-serif;
-  letter-spacing: 0.5px;
-}
+h1, h2, h3 { font-family: 'Russo One', sans-serif; letter-spacing: 0.5px; }
 
-/* Утилиты (используются в нескольких компонентах) */
-.w-full  { width: 100%; }
+.w-full      { width: 100%; }
 .text-center { text-align: center; }
+
+.app-shell { display: flex; flex-direction: column; min-height: 100vh; }
+.app-main  { flex: 1; }
 </style>

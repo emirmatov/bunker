@@ -1,16 +1,6 @@
 import { createRouter, createWebHistory } from 'vue-router'
-import { auth } from '../firebase'
-import { onAuthStateChanged } from 'firebase/auth'
+import { useGameStore } from '../stores/game'
 import Home from '../views/Home.vue'
-
-/** Ждём первой инициализации Firebase Auth перед навигацией */
-const getCurrentUser = () =>
-  new Promise((resolve) => {
-    const unsubscribe = onAuthStateChanged(auth, (user) => {
-      unsubscribe()
-      resolve(user)
-    })
-  })
 
 const router = createRouter({
   history: createWebHistory(import.meta.env.BASE_URL),
@@ -18,33 +8,65 @@ const router = createRouter({
     {
       path: '/',
       name: 'home',
-      component: Home
+      component: Home,
+      // Главная доступна всем — публичный лендинг
+    },
+    {
+      path: '/rules',
+      name: 'rules',
+      component: () => import('../views/Rules.vue'),
+    },
+    {
+      path: '/about',
+      name: 'about',
+      component: () => import('../views/About.vue'),
+    },
+    {
+      path: '/auth',
+      name: 'auth',
+      component: () => import('../views/Auth.vue'),
+      meta: { hideChrome: false },
+    },
+    {
+      path: '/settings',
+      name: 'settings',
+      component: () => import('../views/Settings.vue'),
+      meta: { requiresAuth: true },
     },
     {
       path: '/lobby/:id',
       name: 'lobby',
       component: () => import('../views/Lobby.vue'),
-      meta: { requiresAuth: true }
+      meta: { requiresAuth: true },
     },
     {
       path: '/game/:id',
       name: 'game',
       component: () => import('../views/Game.vue'),
-      meta: { requiresAuth: true }
+      meta: { requiresAuth: true, hideChrome: true },
     },
-    // Fallback — перекидываем на главную при неизвестном маршруте
     {
       path: '/:pathMatch(.*)*',
-      redirect: '/'
-    }
-  ]
+      redirect: '/',
+    },
+  ],
 })
 
-// Гард: защищённые маршруты доступны только авторизованным пользователям
-router.beforeEach(async (to) => {
-  if (to.meta.requiresAuth) {
-    const user = await getCurrentUser()
-    if (!user) return { name: 'home' }
+router.beforeEach((to) => {
+  const store = useGameStore()
+
+  // Уже залогинен — не пускаем на /auth
+  if (to.name === 'auth') {
+    if (store.currentUser) return { name: 'home' }
+    return
+  }
+
+  // Защищённый маршрут — нужна авторизация
+  if (to.meta.requiresAuth && !store.currentUser) return { name: 'auth' }
+
+  // Никнейм не задан — отправляем в настройки (кроме самой страницы настроек)
+  if (to.meta.requiresAuth && to.name !== 'settings' && !store.currentUser?.nickname) {
+    return { name: 'settings', query: { setup: '1' } }
   }
 })
 

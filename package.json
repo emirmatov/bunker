@@ -27,6 +27,7 @@
     "eslint-config-prettier": "^10.1.8",
     "eslint-plugin-oxlint": "~1.57.0",
     "eslint-plugin-vue": "~10.8.0",
+    "firebase-admin": "^13.8.0",
     "globals": "^17.4.0",
     "npm-run-all2": "^8.0.4",
     "oxlint": "~1.57.0",

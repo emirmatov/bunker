@@ -37,3 +37,45 @@ __screenshots__/
 
 # Vite
 *.timestamp-*-*.mjs
+
+# ═══ Секреты и конфиги ═══
+# .env файлы (Vite подхватывает их в порядке приоритета .env.local > .env.[mode] > .env)
+.env
+.env.local
+.env.*.local
+.env.development
+.env.production
+.env.staging
+# Но шаблон .env.example должен быть в git — исключение
+!.env.example
+
+# Service Account Keys (Firebase Admin SDK / Google Cloud)
+# ВАЖНО: эти файлы дают полный доступ к проекту. Никогда не в git.
+*serviceAccount*.json
+*service-account*.json
+firebase-adminsdk-*.json
+google-credentials*.json
+gcp-*.json
+
+# Firebase кеш и локальные настройки
+.firebase/
+.firebaserc.local
+firebase-debug.log
+firestore-debug.log
+database-debug.log
+pubsub-debug.log
+ui-debug.log
+
+# IDE/OS
+.idea/
+*.swp
+Thumbs.db
+
+# Claude Code рабочие файлы
+.claude/
+
+# Локальные скрипты, которые могут содержать секреты
+scripts/*-local.*
+*.pem
+*.key
+*.cert

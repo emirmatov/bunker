@@ -1,0 +1,60 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    function isRoomPlayer(roomId) {
+      return isSignedIn() &&
+        exists(/databases/$(database)/documents/rooms/$(roomId)/players/$(request.auth.uid));
+    }
+
+    function isRoomHost(roomId) {
+      return isSignedIn() &&
+        get(/databases/$(database)/documents/rooms/$(roomId)/players/$(request.auth.uid)).data.isHost == true;
+    }
+
+    // Профили пользователей — только свой
+    match /users/{userId} {
+      allow read, write: if isSignedIn() && request.auth.uid == userId;
+    }
+
+    // Паки карт — читать может любой залогиненный
+    match /packs/{packId} {
+      allow read:  if isSignedIn();
+      allow write: if false;
+    }
+
+    // Комнаты
+    match /rooms/{roomId} {
+      // Любой залогиненный может прочитать комнату (нужно для проверки кода при входе)
+      allow read: if isSignedIn();
+
+      allow create: if isSignedIn()
+        && request.resource.data.hostId == request.auth.uid;
+
+      // Обновлять может хост или участник (нужно для голосования и т.д.)
+      allow update: if isRoomHost(roomId) || isRoomPlayer(roomId);
+
+      allow delete: if isRoomHost(roomId);
+
+      // Игроки
+      match /players/{playerId} {
+        // Читать список может любой залогиненный (нужно для проверки лимита при входе)
+        allow read: if isSignedIn();
+
+        allow create: if isSignedIn()
+          && request.auth.uid == playerId
+          && request.resource.data.uid == request.auth.uid;
+
+        // Любой участник комнаты может обновить любого игрока —
+        // нужно для спецкарт (иммунитет, вскрытие, штрафы и т.д.)
+        allow update: if isRoomPlayer(roomId);
+
+        allow delete: if isRoomHost(roomId) || request.auth.uid == playerId;
+      }
+    }
+  }
+}

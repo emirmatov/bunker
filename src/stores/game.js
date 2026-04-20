@@ -1,60 +1,54 @@
 import { defineStore } from 'pinia'
 import { ref, computed } from 'vue'
-import { auth } from '../firebase'
-import { onAuthStateChanged, signInAnonymously } from 'firebase/auth'
+import { auth, db } from '../firebase'
+import { onAuthStateChanged } from 'firebase/auth'
+import { doc, getDoc } from 'firebase/firestore'
 
 export const useGameStore = defineStore('game', () => {
-  // ─── Состояние аутентификации ─────────────────────────────────
-  const currentUser = ref(null)
+  const currentUser = ref(null) // { uid, email, displayName, nickname }
   const isAuthReady = ref(false)
 
-  // Инициализация: слушаем auth и при необходимости входим анонимно
   const initAuth = () =>
     new Promise((resolve) => {
-      const unsub = onAuthStateChanged(auth, async (user) => {
+      let resolved = false
+      // Листенер остаётся активным до конца жизни приложения —
+      // тогда logout/login автоматически отражаются в store
+      onAuthStateChanged(auth, async (user) => {
         if (user) {
-          currentUser.value = { uid: user.uid, isAnonymous: user.isAnonymous }
-          isAuthReady.value = true
-          unsub()
-          resolve(user)
-        } else {
-          try {
-            const cred = await signInAnonymously(auth)
-            currentUser.value = { uid: cred.user.uid, isAnonymous: true }
-          } catch (e) {
-            console.error('[GameStore] Ошибка анонимного входа:', e)
-          } finally {
-            isAuthReady.value = true
-            unsub()
-            resolve(null)
+          const snap = await getDoc(doc(db, 'users', user.uid))
+          const nickname = snap.exists() ? (snap.data().nickname ?? null) : null
+          currentUser.value = {
+            uid: user.uid,
+            email: user.email,
+            displayName: user.displayName,
+            nickname,
+            isAnonymous: user.isAnonymous,
           }
+        } else {
+          currentUser.value = null
         }
+        isAuthReady.value = true
+        if (!resolved) { resolved = true; resolve(user) }
       })
     })
 
-  // ─── Состояние текущей комнаты ─────────────────────────────────
-  const roomId    = ref(null)
-  const roomData  = ref(null)   // данные документа Firestore
-  const players   = ref([])     // массив игроков из подколлекции
+  const setNickname = (nickname) => {
+    if (currentUser.value) currentUser.value = { ...currentUser.value, nickname }
+  }
+
+  // ─── Состояние комнаты ────────────────────────────────────────
+  const roomId   = ref(null)
+  const roomData = ref(null)
+  const players  = ref([])
 
   const me = computed(() =>
     players.value.find(p => p.uid === currentUser.value?.uid) ?? null
   )
-
   const alivePlayers = computed(() =>
     players.value.filter(p => p.isAlive !== false)
   )
-
   const isHost = computed(() => me.value?.isHost === true)
 
-  // Сохранить имя игрока в localStorage между сессиями
-  const savedName = ref(localStorage.getItem('bunker_player_name') ?? '')
-  const setName = (name) => {
-    savedName.value = name
-    localStorage.setItem('bunker_player_name', name)
-  }
-
-  // Сбросить локальный стейт при выходе из комнаты
   const reset = () => {
     roomId.value   = null
     roomData.value = null
@@ -62,20 +56,16 @@ export const useGameStore = defineStore('game', () => {
   }
 
   return {
-    // auth
     currentUser,
     isAuthReady,
     initAuth,
-    // room
+    setNickname,
     roomId,
     roomData,
     players,
     me,
     alivePlayers,
     isHost,
-    // utils
-    savedName,
-    setName,
-    reset
+    reset,
   }
 })

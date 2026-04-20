@@ -14,9 +14,20 @@ import {
 
 import Button from 'primevue/button'
 import Tag    from 'primevue/tag'
-import Panel  from 'primevue/panel'
-import Dialog from 'primevue/dialog'
 import { useToast } from 'primevue/usetoast'
+
+import GameParticles   from '../components/game/GameParticles.vue'
+import KickAnimation   from '../components/game/KickAnimation.vue'
+import DeathOverlay    from '../components/game/DeathOverlay.vue'
+import GameEndDialog   from '../components/game/GameEndDialog.vue'
+import VotingDialog    from '../components/game/VotingDialog.vue'
+import SpecialCardDialog from '../components/game/SpecialCardDialog.vue'
+import PeekDialog      from '../components/game/PeekDialog.vue'
+import PlayerDossier   from '../components/game/PlayerDossier.vue'
+import CatastropheBlock from '../components/game/CatastropheBlock.vue'
+import TurnIndicator   from '../components/game/TurnIndicator.vue'
+import OthersGrid      from '../components/game/OthersGrid.vue'
+import EventLog        from '../components/game/EventLog.vue'
 defineOptions({ name: 'GameView' })
 const route  = useRoute()
 const router = useRouter()
@@ -95,7 +106,8 @@ const timerSeconds = ref(0)
 const timerWarning = computed(() =>
   timerSeconds.value <= 10 && timerSeconds.value > 0 && (room.value?.timerDuration || 0) > 0
 )
-let timerInterval = null
+let timerInterval  = null
+let isPassingTurn  = false // защита от двойного вызова passTurn по таймеру
 
 const syncTimer = () => {
   if (!room.value?.timerDuration) { timerSeconds.value = 0; return }
@@ -103,8 +115,9 @@ const syncTimer = () => {
   const end = room.value?.turnEndTime?.toMillis?.()
   if (!end) { timerSeconds.value = room.value.timerDuration; return }
   timerSeconds.value = Math.max(0, Math.ceil((end - Date.now()) / 1000))
-  if (timerSeconds.value === 0 && me.value?.isHost && room.value?.status === 'playing' && activePlayerId.value) {
-    passTurn({ force: true, reason: 'timeout' })
+  if (timerSeconds.value === 0 && me.value?.isHost && room.value?.status === 'playing' && activePlayerId.value && !isPassingTurn) {
+    isPassingTurn = true
+    passTurn({ force: true, reason: 'timeout' }).finally(() => { isPassingTurn = false })
   }
 }
 
@@ -142,13 +155,19 @@ onMounted(() => {
 })
 
 function initListeners() {
-  unsubRoom = onSnapshot(doc(db, 'rooms', roomId), (snap) => {
-    if (!snap.exists()) return router.push({ name: 'home' })
-    room.value = snap.data()
-  })
-  unsubPlayers = onSnapshot(collection(db, 'rooms', roomId, 'players'), (snap) => {
-    players.value = snap.docs.map(d => d.data())
-  })
+  unsubRoom = onSnapshot(
+    doc(db, 'rooms', roomId),
+    (snap) => {
+      if (!snap.exists()) return router.push({ name: 'home' })
+      room.value = snap.data()
+    },
+    () => router.push({ name: 'home' }),
+  )
+  unsubPlayers = onSnapshot(
+    collection(db, 'rooms', roomId, 'players'),
+    (snap) => { players.value = snap.docs.map(d => d.data()) },
+    (err) => toast.add({ severity: 'error', summary: 'Ошибка соединения', detail: err.message, life: 5000 }),
+  )
 }
 
 onUnmounted(() => {
@@ -209,14 +228,14 @@ const logEvent = async (msg) => {
   })
 }
 
-// ─── Установить таймер для нового хода ──────────────────────────
-const setTurnTimer = async () => {
+// Возвращает поля таймера для вставки в updateDoc — не отдельный запрос
+const timerFields = () => {
   const dur = room.value?.timerDuration
-  if (!dur || dur === 0) return
-  await updateDoc(doc(db, 'rooms', roomId), {
+  if (!dur || dur === 0) return {}
+  return {
     turnEndTime: Timestamp.fromDate(new Date(Date.now() + dur * 1000)),
     timerPaused: false,
-  })
+  }
 }
 
 // ─── Ходы ─────────────────────────────────────────────────────
@@ -236,8 +255,8 @@ const startFirstTurn = async () => {
     await updateDoc(doc(db, 'rooms', roomId), {
       activePlayerId: sorted[0].uid,
       status: 'playing',
+      ...timerFields(),
     })
-    await setTurnTimer()
   }
 }
 
@@ -279,8 +298,7 @@ const keepRoundOnTimeout = reason === 'timeout'
       await updateDoc(doc(db, 'rooms', roomId), { status: 'voting', votes: {} })
     }
   } else {
-    await updateDoc(doc(db, 'rooms', roomId), { activePlayerId: next.uid })
-    await setTurnTimer()
+    await updateDoc(doc(db, 'rooms', roomId), { activePlayerId: next.uid, ...timerFields() })
   }
 }
 
@@ -347,14 +365,9 @@ const voteFor = async (targetUid) => {
 
 // ─── Watchers ────────────────────────────────────────────────
 
-// Авто-пропуск заглушённого + установка таймера
+// Авто-пропуск заглушённого
 watch(activePlayerId, async (newId) => {
   if (!me.value?.isHost || !newId) return
-
-  // Устанавливаем таймер (если не конец раунда)
-  if (room.value?.status === 'playing') await setTurnTimer()
-
-  // Пропуск заглушённых
   if (room.value?.status !== 'playing') return
   const activePlayer = players.value.find(p => p.uid === newId)
   if (!activePlayer?.isMuted) return
@@ -370,8 +383,7 @@ watch(activePlayerId, async (newId) => {
   if (!next || next.uid === newId || idx === sorted.length - 1) {
     await updateDoc(doc(db, 'rooms', roomId), { status: 'voting', votes: {} })
   } else {
-    await updateDoc(doc(db, 'rooms', roomId), { activePlayerId: next.uid })
-    await setTurnTimer()
+    await updateDoc(doc(db, 'rooms', roomId), { activePlayerId: next.uid, ...timerFields() })
   }
 })
 watch([isMyTurn, () => room.value?.status], ([myTurn, status]) => {
@@ -439,10 +451,9 @@ watch(() => room.value?.votes, async (newVotes) => {
   }
   const sorted = [...aliveAfterKick].sort((a, b) => a.uid.localeCompare(b.uid))
   batch.update(doc(db, 'rooms', roomId), {
-    status: 'playing', votes: {}, activePlayerId: sorted[0]?.uid || null,
+    status: 'playing', votes: {}, activePlayerId: sorted[0]?.uid || null, ...timerFields(),
   })
   await batch.commit()
-  await setTurnTimer()
 }, { deep: true })
 
 // ─── Спец-карты ──────────────────────────────────────────────
@@ -889,9 +900,9 @@ const restartGame = async () => {
     activePlayerId: sorted[0].uid,
     bunkerSize: Math.max(2, Math.floor(players.value.length / 2)),
     timerPaused: false,
+    ...timerFields(),
   })
   await batch.commit()
-  await setTurnTimer()
 }
 </script>
 
@@ -903,277 +914,87 @@ const restartGame = async () => {
 
   <div v-else class="game-wrapper">
 
-    <!-- ══ Частицы ══ -->
-    <Teleport to="body">
-      <div v-if="showParticles" class="particles-root" aria-hidden="true">
-        <span
-          v-for="(p, i) in particleItems"
-          :key="i"
-          class="particle"
-          :style="{
-            left: particleOrigin.x + 'px',
-            top:  particleOrigin.y + 'px',
-            width:  p.size + 'px',
-            height: p.size + 'px',
-            background: p.color,
-            '--tx': p.tx + 'px',
-            '--ty': p.ty + 'px',
-            animationDuration: p.dur + 's',
-            animationDelay: p.delay + 's',
-          }"
-        />
-      </div>
-    </Teleport>
-
-    <!-- ══ Анимация кика ══ -->
-    <Teleport to="body">
-      <Transition name="kick">
-        <div v-if="showKickAnim" class="kick-overlay">
-          <div class="kick-content">
-            <div class="kick-icon">{{ kickAnimIsSelf ? '😱' : '🚪' }}</div>
-            <h2 class="kick-name">{{ kickAnimName }}</h2>
-            <p class="kick-label">{{ kickAnimIsSelf ? 'ВЫ ИЗГНАНЫ' : 'ИЗГНАН ИЗ БУНКЕРА' }}</p>
-          </div>
-        </div>
-      </Transition>
-    </Teleport>
-
-    <!-- ══ Оверлей смерти (ты умер) ══ -->
-    <div
-      v-if="me.isAlive === false && !isSpectatorMode && room.status !== 'finished'"
-      class="death-overlay"
-    >
-      <div class="death-content">
-        <div class="death-icon">💀</div>
-        <h2 class="death-title">ВЫ ИЗГНАНЫ</h2>
-        <p class="death-sub">Бункер закрылся перед вашим носом</p>
-        <Button label="НАБЛЮДАТЬ ЗА ИГРОЙ" severity="danger" outlined class="mt-btn"
-          icon="pi pi-eye" @click="isSpectatorMode = true" />
-      </div>
-    </div>
-
-    <!-- ══ Диалог: игра окончена ══ -->
-    <Dialog :visible="room.status === 'finished'" modal header="☢️ ИГРА ОКОНЧЕНА" :closable="false">
-      <div class="text-center end-dialog-body">
-        <h2 class="end-title">БУНКЕР ЗАКРЫТ</h2>
-        <p class="end-sub">В бункер прошли:</p>
-        <div class="survivors-wrap">
-          <Tag v-for="p in players.filter(x => x.isAlive !== false)" :key="p.uid"
-            :value="p.name" severity="success" class="survivor-tag" />
-        </div>
-        <Button v-if="me.isHost" label="СЫГРАТЬ ЕЩЕ РАЗ" severity="danger" size="large"
-          class="w-full" icon="pi pi-refresh" @click="restartGame" />
-      </div>
-    </Dialog>
-
-    <!-- ══ Диалог: голосование ══ -->
-    <Dialog :visible="isVoting" modal header="🗳️ ГОЛОСОВАНИЕ" :closable="false">
-      <div v-if="me.isAlive === false" class="text-center muted-msg">Вы мертвы — наблюдайте</div>
-      <div v-else-if="me.isMuted"      class="text-center muted-msg">🤐 Вы заглушены — не можете голосовать</div>
-      <div v-else-if="me.hasNoVote"    class="text-center muted-msg">🤬 Ваш голос не учитывается (Дота-рейдж)</div>
-      <div v-else-if="!myVote" class="vote-panel">
-        <p class="vote-hint">Кого НЕ возьмёте в бункер?</p>
-        <Button
-          v-for="p in alivePlayers.filter(x => x.uid !== myUid)"
-          :key="p.uid"
-          :label="p.name + (p.hasImmunity ? ' 🛡️' : '')"
-          severity="danger" outlined class="w-full vote-btn"
-          @click="voteFor(p.uid)"
-        />
-        <div class="vote-divider" />
-        <Button label="ВОЗДЕРЖАТЬСЯ" severity="secondary" class="w-full" @click="voteFor('skip_vote')" />
-        <p class="vote-tally">
-          Проголосовали: {{ Object.keys(room.votes || {}).length }} / {{ alivePlayers.length }}
-        </p>
-      </div>
-      <div v-else class="text-center voted-msg">✅ Голос принят. Ожидаем остальных…</div>
-    </Dialog>
-
-    <!-- ══ Диалог: выбор цели для спецкарты ══ -->
-    <Dialog v-model:visible="showSpecialDialog" modal
-      :header="'⚡ ' + getCardText(selectedSpecialCard?.data.value)">
-      <p class="spec-hint">Выберите цель:</p>
-      <template v-if="['revive','necromancy_fail'].includes(selectedSpecialCard?.data.value.id)">
-        <Button v-for="p in deadPlayers" :key="p.uid" :label="p.name"
-          severity="success" outlined class="w-full spec-btn" @click="applySpecialCard(p.uid)" />
-        <p v-if="!deadPlayers.length" class="spec-empty">Нет изгнанных игроков</p>
-      </template>
-      <template v-else>
-        <Button
-          v-for="p in alivePlayers.filter(x => x.uid !== myUid)"
-          :key="p.uid"
-          :label="p.name + (p.specialShield ? ' 💊' : '')"
-          severity="warning" outlined class="w-full spec-btn"
-          @click="applySpecialCard(p.uid)"
-        />
-      </template>
-      <Button label="Отмена" severity="secondary" text class="w-full mt-2"
-        @click="showSpecialDialog = false; selectedSpecialCard = null" />
-    </Dialog>
-
-    <!-- ══ Диалог: тайный просмотр (check_card) ══ -->
-    <Dialog v-model:visible="peekDialog" modal header="👁️ Секретный просмотр">
-      <div class="peek-body">
-        <p class="peek-player">Карта игрока <strong>{{ peekInfo.playerName }}</strong></p>
-        <div class="peek-card">
-          <span class="card-label">{{ peekInfo.label }}</span>
-          <span class="card-value" style="font-size:1rem; margin-top:0.5rem">{{ peekInfo.value }}</span>
-        </div>
-        <p class="peek-note">Только ты видишь эту карту. Она остаётся скрытой для всех.</p>
-        <Button label="Понял, закрыть" severity="success" class="w-full" style="margin-top:1rem" @click="peekDialog = false" />
-      </div>
-    </Dialog>
+    <GameParticles :show="showParticles" :particles="particleItems" :origin="particleOrigin" />
+    <KickAnimation :show="showKickAnim" :name="kickAnimName" :is-self="kickAnimIsSelf" />
+    <DeathOverlay
+      :show="me.isAlive === false && !isSpectatorMode && room.status !== 'finished'"
+      @spectate="isSpectatorMode = true"
+    />
+    <GameEndDialog
+      :visible="room.status === 'finished'"
+      :players="players"
+      :is-host="!!me.isHost"
+      @restart="restartGame"
+    />
+    <VotingDialog
+      :visible="isVoting"
+      :me="me"
+      :my-uid="myUid"
+      :alive-players="alivePlayers"
+      :my-vote="myVote"
+      :votes="room.votes || {}"
+      @vote="voteFor"
+    />
+    <SpecialCardDialog
+      v-model:visible="showSpecialDialog"
+      :card="selectedSpecialCard"
+      :alive-players="alivePlayers"
+      :dead-players="deadPlayers"
+      :my-uid="myUid"
+      @apply="applySpecialCard"
+    />
+    <PeekDialog
+      v-model:visible="peekDialog"
+      :player-name="peekInfo.playerName"
+      :label="peekInfo.label"
+      :value="peekInfo.value"
+    />
 
     <!-- ══ ИГРОВОЕ ПОЛЕ ══ -->
     <div class="game-board" :class="{ 'spectator-dim': me.isAlive === false && !isSpectatorMode }">
 
-      <!-- Левая панель: Моё досьё -->
-      <aside class="left-sidebar">
-        <h2 class="section-title red-title">МОЁ ДОСЬЁ</h2>
-        <div v-if="me.isAlive === false" class="dead-badge">💀 ВЫ МЕРТВЫ</div>
+      <PlayerDossier
+        :me="me"
+        :is-my-turn="isMyTurn"
+        :card-order="cardOrder"
+        :card-labels="cardLabels"
+        :get-card-text="getCardText"
+        @reveal-card="revealCard"
+      />
 
-        <!-- Статусы -->
-        <div v-if="me.hasImmunity || me.hasDoubleVote || me.specialShield || me.specialBlocked || me.hasNoVote || me.isMuted" class="status-badges">
-          <Tag v-if="me.hasImmunity"    severity="success" value="🛡️ Иммунитет"    class="text-xs" />
-          <Tag v-if="me.hasDoubleVote"  severity="warning" value="⚖️ ×2 голос"      class="text-xs" />
-          <Tag v-if="me.specialShield"  severity="info"    value="💊 Щит"            class="text-xs" />
-          <Tag v-if="me.specialBlocked" severity="danger"  value="🔪 Спец заблок."  class="text-xs" />
-          <Tag v-if="me.hasNoVote"      severity="danger"  value="🤬 Нет голоса"    class="text-xs" />
-          <Tag v-if="me.isMuted"        severity="danger"  value="🤐 Заглушён"      class="text-xs" />
-        </div>
-
-        <div class="cards-grid">
-          <div
-            v-for="k in cardOrder"
-            :key="k"
-            class="flip-container"
-            :class="{
-              'is-flipped': me.cards?.[k]?.isRevealed,
-              'is-locked':  (!isMyTurn || me.isAlive === false) && !me.cards?.[k]?.isRevealed,
-              'is-special': k.startsWith('special')
-            }"
-            @click="revealCard(k, me.cards?.[k], $event)"
-          >
-            <div class="flip-inner">
-              <div class="flip-front">
-                <span class="card-label">{{ cardLabels[k] }}</span>
-                <span class="card-value card-value-private">{{ getCardText(me.cards?.[k]?.value) ?? '???' }}</span>
-                <div class="card-action-hint">
-                  <Tag v-if="isMyTurn && me.isAlive !== false" severity="danger"    value="Вскрыть" class="text-xs" />
-                  <Tag v-else                                   severity="secondary" value="🔒"      class="text-xs" />
-                </div>
-              </div>
-              <div class="flip-back" :class="{ 'flip-back-special': k.startsWith('special') }">
-                <span class="card-label">{{ cardLabels[k] }}</span>
-                <span class="card-value">{{ getCardText(me.cards?.[k]?.value) }}</span>
-                <Tag severity="success" value="ВСКРЫТО" class="mt-auto text-xs" />
-              </div>
-            </div>
-          </div>
-        </div>
-      </aside>
-
-      <!-- Главная колонка -->
       <main class="main-column">
+        <CatastropheBlock
+          :name="room.catastrophe?.name"
+          :description="room.catastrophe?.description"
+          :bunker-size="room.bunkerSize || 2"
+          :alive-count="alivePlayersCount"
+        />
+        <TurnIndicator
+          :active-player-id="activePlayerId"
+          :is-my-turn="isMyTurn"
+          :active-player-name="activePlayerName"
+          :can-pass-turn="canPassTurn"
+          :is-host="!!me.isHost"
+          :timer-duration="room.timerDuration || 0"
+          :timer-seconds="timerSeconds"
+          :timer-warning="timerWarning"
+          :timer-paused="!!room.timerPaused"
+          @start="startFirstTurn"
+          @pass="onPassTurnClick"
+          @pause="pauseTimer"
+          @resume="resumeTimer"
+        />
 
-        <!-- Катастрофа -->
-        <section class="catastrophe-block">
-          <h1 class="catastrophe-name">{{ room.catastrophe?.name }}</h1>
-          <p class="catastrophe-desc">{{ room.catastrophe?.description }}</p>
-          <div class="bunker-stats">
-            <Tag severity="warning" :value="`ВМЕСТИМОСТЬ: ${room.bunkerSize || 2}`" class="stat-tag" />
-            <Tag severity="info"    :value="`ЖИВЫХ: ${alivePlayersCount}`"           class="stat-tag" />
-          </div>
-        </section>
-
-        <!-- Индикатор хода + таймер -->
-        <div class="turn-indicator" :class="isMyTurn ? 'turn-mine' : 'turn-wait'">
-          <div class="turn-header">
-            <p class="turn-text" :class="isMyTurn ? 'green-text' : 'muted-text'">
-              {{ !activePlayerId ? '⏸ Ожидание старта…' : isMyTurn ? '🚨 ВАШ ХОД!' : `⏳ Ходит: ${activePlayerName}` }}
-            </p>
-
-            <!-- Таймер -->
-            <div v-if="room.timerDuration > 0 && activePlayerId" class="timer-wrap">
-              <div
-                class="timer-circle"
-                :class="{
-                  'timer-warn':   timerWarning,
-                  'timer-paused': room.timerPaused
-                }"
-              >
-                <svg viewBox="0 0 44 44" class="timer-svg">
-                  <circle cx="22" cy="22" r="18" class="timer-track" />
-                  <circle
-                    cx="22" cy="22" r="18"
-                    class="timer-progress"
-                    :class="{ 'timer-progress-warn': timerWarning }"
-                    :style="{
-                      strokeDashoffset: 113 - (113 * Math.min(timerSeconds, room.timerDuration)) / room.timerDuration
-                    }"
-                  />
-                </svg>
-                <span class="timer-num" :class="{ 'timer-num-warn': timerWarning }">
-                  {{ room.timerPaused ? '⏸' : timerSeconds }}
-                </span>
-              </div>
-              <!-- Пауза/возобновление для хоста -->
-              <button
-                v-if="me.isHost"
-                class="timer-pause-btn"
-                :title="room.timerPaused ? 'Возобновить таймер' : 'Пауза таймера'"
-                @click="room.timerPaused ? resumeTimer() : pauseTimer()"
-              >
-                {{ room.timerPaused ? '▶' : '⏸' }}
-              </button>
-            </div>
-          </div>
-
-          <div class="turn-actions">
-            <Button v-if="me.isHost && !activePlayerId" label="Начать игру" severity="warning" size="large" icon="pi pi-play" @click="startFirstTurn" />
-            <Button
-              v-if="canPassTurn"
-              :label="isMyTurn ? 'Завершить ход' : 'Пропустить ход игрока'"
-              severity="success"
-              icon="pi pi-check"
-              size="large"
-              @click="onPassTurnClick"
-            />
-          </div>
-        </div>
-
-        <!-- Другие игроки -->
         <h2 class="section-title blue-title">ДРУГИЕ ВЫЖИВШИЕ</h2>
-        <div class="others-grid">
-          <Panel
-            v-for="p in others"
-            :key="p.uid"
-            :header="p.name + (p.isMuted ? ' 🤐' : '') + (p.hasImmunity ? ' 🛡️' : '') + (p.specialShield ? ' 💊' : '') + (p.hasNoVote ? ' 🤬' : '')"
-            toggleable class="player-panel"
-            :class="{ 'panel-dead': p.isAlive === false, 'panel-active': p.uid === activePlayerId }"
-          >
-            <template #icons>
-              <Tag v-if="p.isAlive === false"          severity="danger"  value="МЁРТВ"   class="mr-2" />
-              <Tag v-else-if="p.uid === activePlayerId" severity="success" value="ЕГО ХОД" class="mr-2" />
-            </template>
-            <ul class="revealed-list">
-              <li v-for="k in cardOrder" :key="k" class="info-row">
-                <span class="info-label">{{ cardLabels[k] }}</span>
-                <span v-if="p.cards?.[k]?.isRevealed" class="info-value">{{ getCardText(p.cards[k].value) }}</span>
-                <span v-else class="info-hidden">Скрыто</span>
-              </li>
-            </ul>
-          </Panel>
-        </div>
+        <OthersGrid
+          :players="others"
+          :active-player-id="activePlayerId"
+          :card-order="cardOrder"
+          :card-labels="cardLabels"
+          :get-card-text="getCardText"
+        />
 
-        <!-- Лог -->
-        <details v-if="room.logs?.length" class="logs-panel">
-          <summary>📋 Журнал событий ({{ room.logs.length }})</summary>
-          <ul class="logs-list">
-            <li v-for="(entry, i) in [...(room.logs || [])].reverse()" :key="i">{{ entry }}</li>
-          </ul>
-        </details>
-
+        <EventLog :logs="room.logs || []" />
       </main>
     </div>
   </div>
@@ -1189,172 +1010,16 @@ const restartGame = async () => {
 .game-board    { display:grid; grid-template-columns:300px 1fr; gap:3rem; align-items:start; }
 .spectator-dim { opacity:0.4; pointer-events:none; }
 
-/* ── Частицы ── */
-.particles-root { position:fixed; inset:0; pointer-events:none; z-index:10000; overflow:visible; }
-.particle {
-  position:absolute;
-  border-radius:50%;
-  transform:translate(-50%,-50%);
-  animation:particle-fly var(--dur, 0.8s) ease-out forwards;
-  will-change:transform,opacity;
-}
-@keyframes particle-fly {
-  0%   { transform: translate(-50%,-50%) scale(1); opacity:1; }
-  100% { transform: translate(calc(-50% + var(--tx)), calc(-50% + var(--ty))) scale(0); opacity:0; }
-}
-
-/* ── Анимация кика ── */
-.kick-overlay {
-  position:fixed; inset:0; z-index:9990;
-  display:flex; align-items:center; justify-content:center;
-  background:rgba(0,0,0,0.85); backdrop-filter:blur(8px);
-  pointer-events:none;
-}
-.kick-content { text-align:center; }
-.kick-icon    { font-size:6rem; animation:kick-bounce 0.4s ease; }
-.kick-name    { font-family:'Russo One',sans-serif; font-size:3rem; color:var(--color-accent); letter-spacing:3px; margin:0.5rem 0; }
-.kick-label   { color:var(--color-muted); font-size:1.1rem; letter-spacing:4px; text-transform:uppercase; }
-@keyframes kick-bounce { 0%{transform:scale(0.3)} 60%{transform:scale(1.15)} 100%{transform:scale(1)} }
-.kick-enter-active { animation: kick-enter 0.35s ease; }
-.kick-leave-active { animation: kick-leave 0.4s ease forwards; }
-@keyframes kick-enter { from { opacity:0; transform:scale(0.7); } to { opacity:1; transform:scale(1); } }
-@keyframes kick-leave { from { opacity:1; } to { opacity:0; transform:scale(1.1); } }
-
-/* ── Смерть ── */
-.death-overlay {
-  position:fixed; inset:0; background:rgba(5,0,0,0.96); z-index:9999;
-  display:flex; align-items:center; justify-content:center; backdrop-filter:blur(10px);
-}
-.death-content { text-align:center; border:2px solid var(--color-accent); padding:3.5rem; border-radius:var(--radius-lg); background:rgba(0,0,0,0.8); box-shadow:0 0 80px rgba(229,62,62,0.2); }
-.death-icon    { font-size:5rem; margin-bottom:0.75rem; }
-.death-title   { font-size:2.5rem; color:var(--color-accent); letter-spacing:4px; margin-bottom:0.5rem; }
-.death-sub     { color:var(--color-muted); margin-bottom:1.5rem; }
-.mt-btn        { margin-top:1rem; }
-
-/* ── Диалоги ── */
-.end-dialog-body { padding:1rem; }
-.end-title       { font-size:2rem; color:var(--color-success); margin-bottom:0.5rem; }
-.end-sub         { color:var(--color-muted); margin-bottom:1.5rem; }
-.survivors-wrap  { display:flex; flex-wrap:wrap; justify-content:center; gap:0.5rem; margin-bottom:2rem; }
-.survivor-tag    { font-size:1.1rem; padding:0.5rem 1rem; }
-
-.vote-panel   { display:flex; flex-direction:column; gap:0.5rem; padding:0.5rem; }
-.vote-hint    { color:var(--color-muted); text-align:center; margin-bottom:0.25rem; }
-.vote-btn     { margin-bottom:0; }
-.vote-divider { height:1px; background:var(--color-border); margin:0.5rem 0; }
-.vote-tally   { text-align:center; color:var(--color-muted); font-size:0.8rem; margin-top:0.5rem; }
-.voted-msg    { color:var(--color-success); font-weight:700; padding:1.5rem; font-size:1.1rem; }
-.muted-msg    { color:var(--color-muted); padding:1rem; text-align:center; }
-
-.spec-hint  { color:var(--color-muted); text-align:center; margin-bottom:0.75rem; }
-.spec-btn   { margin-bottom:0.5rem; }
-.spec-empty { color:#555; text-align:center; font-style:italic; }
-.mt-2       { margin-top:0.5rem; }
-
-.peek-body   { padding:0.5rem; }
-.peek-player { color:var(--color-muted); margin-bottom:0.75rem; text-align:center; }
-.peek-card   { background:var(--color-surface-2); border:1px solid var(--color-accent); border-radius:var(--radius-md); padding:1.25rem; display:flex; flex-direction:column; gap:0.5rem; }
-.peek-note   { color:#555; font-size:0.75rem; text-align:center; margin-top:0.75rem; }
-
-/* ── Левая панель ── */
-.left-sidebar  { position:sticky; top:1.5rem; }
 .section-title { font-size:1.1rem; text-transform:uppercase; letter-spacing:1.5px; border-bottom:2px solid var(--color-border); padding-bottom:0.6rem; margin-bottom:1.25rem; }
-.red-title     { color:#f87171; }
 .blue-title    { color:#60a5fa; }
-.dead-badge    { text-align:center; background:rgba(229,62,62,0.15); border:1px solid var(--color-accent); border-radius:var(--radius-sm); padding:0.4rem; color:var(--color-accent); font-size:0.85rem; font-weight:700; margin-bottom:1rem; }
-.status-badges { display:flex; flex-wrap:wrap; gap:0.35rem; margin-bottom:0.75rem; }
-.cards-grid    { display:flex; flex-direction:column; gap:0.6rem; }
 
-/* Flip cards */
-.flip-container { perspective:1200px; height:110px; width:100%; cursor:pointer; margin-bottom:4px; }
-.flip-inner     { position:relative; width:100%; height:100%; transition:transform 0.55s cubic-bezier(0.4,0.2,0.2,1); transform-style:preserve-3d; }
-.flip-container.is-flipped .flip-inner { transform:rotateY(180deg); }
-.flip-front, .flip-back {
-  position:absolute; inset:0; backface-visibility:hidden;
-  display:flex; flex-direction:column; align-items:flex-start; justify-content:space-between;
-  border-radius:12px; padding:12px 16px;
-  box-shadow:0 8px 32px 0 rgba(0,0,0,0.8); backdrop-filter:blur(4px);
-  border:1px solid rgba(255,255,255,0.05); transition:all 0.3s ease;
+@media (max-width: 900px) {
+  .game-wrapper { padding: 1rem 0.75rem; max-width: 100vw; }
+  .game-board   { grid-template-columns: 1fr; gap: 1.5rem; }
 }
-.flip-front { background:linear-gradient(135deg,#1a1a1a 0%,#0a0a0a 100%); border-left:4px solid #444; }
-.flip-container:not(.is-locked):not(.is-flipped) .flip-front:hover { transform:translateX(5px); border-left-color:#f87171; background:linear-gradient(135deg,#222 0%,#111 100%); box-shadow:0 0 15px rgba(248,113,113,0.2); }
-.flip-container.is-locked .flip-front { background:linear-gradient(145deg,#111,#0a0a0a); border:2px solid #1e1e1e; cursor:not-allowed; opacity:0.6; }
-.flip-container.is-special .flip-front { border-left-color:#7c3aed; background:linear-gradient(135deg,#1e133a 0%,#0d0918 100%); }
-.flip-back { background:linear-gradient(135deg,#0f2013 0%,#050505 100%); border-left:4px solid #4ade80; transform:rotateY(180deg); }
-.flip-back-special { background:linear-gradient(135deg,#2d1a5e 0%,#0f0a1e 100%) !important; border-left-color:#a78bfa !important; box-shadow:0 0 20px rgba(124,58,237,0.3); }
 
-.card-label         { font-size:0.65rem; color:#9ca3af; text-transform:uppercase; font-weight:800; letter-spacing:1.2px; margin-bottom:4px; }
-.card-value         { font-weight:600; font-size:0.95rem; color:#e5e7eb; line-height:1.3; word-break:break-word; }
-.card-value-private { opacity:0.7; font-style:italic; color:#aaa; user-select:none; }
-.card-action-hint   { width:100%; display:flex; justify-content:flex-end; margin-top:auto; }
-.mt-auto            { margin-top:auto; }
-.is-locked          { filter:grayscale(0.8); opacity:0.5; cursor:not-allowed; }
-
-/* ── Главная колонка ── */
-.catastrophe-block { text-align:center; margin-bottom:2rem; }
-.catastrophe-name  { font-size:clamp(1.8rem,4vw,2.8rem); color:var(--color-accent); text-shadow:0 0 25px rgba(229,62,62,0.35); margin-bottom:0.5rem; }
-.catastrophe-desc  { color:#9ca3af; max-width:600px; margin:0 auto 1.5rem; }
-.bunker-stats      { display:flex; justify-content:center; gap:0.75rem; flex-wrap:wrap; }
-.stat-tag          { font-size:1rem; }
-
-/* Таймер */
-.turn-indicator { padding:1.25rem; border-radius:var(--radius-md); border:1px solid transparent; text-align:center; transition:all 0.3s; margin-bottom:2rem; }
-.turn-mine      { background:rgba(76,175,80,0.08); border-color:var(--color-success); box-shadow:0 0 20px rgba(76,175,80,0.15); }
-.turn-wait      { background:#131313; border-color:var(--color-border); }
-.turn-header    { display:flex; align-items:center; justify-content:center; gap:1rem; margin-bottom:0.75rem; }
-.turn-text      { font-size:1.2rem; font-weight:700; }
-.green-text     { color:var(--color-success); }
-.muted-text     { color:var(--color-muted); }
-.turn-actions   { display:flex; justify-content:center; gap:0.75rem; }
-
-.timer-wrap       { display:flex; align-items:center; gap:0.4rem; flex-shrink:0; }
-.timer-circle     { position:relative; width:52px; height:52px; }
-.timer-svg        { width:100%; height:100%; transform:rotate(-90deg); }
-.timer-track      { fill:none; stroke:#2a2a2a; stroke-width:4; }
-.timer-progress   { fill:none; stroke:#4ade80; stroke-width:4; stroke-dasharray:113; stroke-linecap:round; transition:stroke-dashoffset 0.8s linear, stroke 0.3s; }
-.timer-progress-warn { stroke:#f87171; }
-.timer-circle.timer-warn .timer-circle { animation:timer-pulse 0.6s ease-in-out infinite; }
-.timer-circle.timer-paused .timer-progress { stroke:#f59e0b; }
-.timer-num        { position:absolute; inset:0; display:flex; align-items:center; justify-content:center; font-weight:800; font-size:0.85rem; color:#e5e7eb; }
-.timer-num-warn   { color:#f87171; }
-@keyframes timer-pulse { 0%,100%{opacity:1} 50%{opacity:0.5} }
-.timer-pause-btn {
-  background:none; border:1px solid var(--color-border); border-radius:50%;
-  width:28px; height:28px; cursor:pointer; color:var(--color-muted);
-  font-size:0.7rem; display:flex; align-items:center; justify-content:center;
-  transition:all 0.2s;
-}
-.timer-pause-btn:hover { border-color:var(--color-warn); color:var(--color-warn); }
-
-/* ── Другие игроки ── */
-.others-grid  { display:flex; flex-wrap:wrap; gap:1.25rem; align-items:flex-start; margin-bottom:2rem; }
-.player-panel { width:300px; flex-shrink:0; }
-.panel-dead   { opacity:0.45; filter:grayscale(1); }
-.panel-active :deep(.p-panel-header) { border-left:4px solid var(--color-success); }
-.revealed-list { list-style:none; padding:0; margin:0; }
-.info-row      { display:flex; justify-content:space-between; align-items:center; border-bottom:1px solid #1a1a1a; padding:0.45rem 0; }
-.info-row:last-child { border-bottom:none; }
-.info-label    { color:#777; font-size:0.8rem; flex-shrink:0; margin-right:0.5rem; }
-.info-value    { color:var(--color-success); font-weight:600; text-align:right; max-width:60%; font-size:0.85rem; word-break:break-word; }
-.info-hidden   { color:#333; font-style:italic; font-size:0.8rem; }
-
-/* ── Лог ── */
-.logs-panel  { background:var(--color-surface); border:1px solid var(--color-border); border-radius:var(--radius-sm); padding:0.75rem 1rem; }
-.logs-panel summary { cursor:pointer; color:var(--color-muted); font-size:0.9rem; }
-.logs-list   { list-style:none; padding:0; margin-top:0.75rem; max-height:200px; overflow-y:auto; }
-.logs-list li { color:#666; font-size:0.78rem; padding:0.3rem 0; border-bottom:1px solid #1a1a1a; }
-.logs-list li:last-child { border-bottom:none; }
-
-/* ── Утилиты ── */
-.mr-2        { margin-right:0.5rem; }
-.text-xs     { font-size:0.72rem; }
-.w-full      { width:100%; }
-.text-center { text-align:center; }
-
-@media (max-width:900px) {
-  .game-board   { grid-template-columns:1fr; gap:2rem; }
-  .left-sidebar { position:static; }
-  .bunker-stats { flex-direction:column; align-items:center; }
-  .player-panel { width:100%; }
+@media (max-width: 600px) {
+  .game-wrapper  { padding: 0.75rem 0.5rem; }
+  .section-title { font-size: 0.95rem; margin-bottom: 1rem; letter-spacing: 1px; }
 }
 </style>

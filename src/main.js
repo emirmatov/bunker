@@ -7,16 +7,25 @@ import Tooltip from 'primevue/tooltip'
 
 import App from './App.vue'
 import router from './router'
+import { useGameStore } from './stores/game'
 
-const app = createApp(App)
+async function bootstrap() {
+  const app   = createApp(App)
+  const pinia = createPinia()
 
-app.use(createPinia())
-app.use(router)
-app.use(PrimeVue, {
-  theme: { preset: Aura },
-  ripple: true
-})
-app.use(ToastService)
-app.directive('tooltip', Tooltip)
+  app.use(pinia)
 
-app.mount('#app')
+  // Ждём инициализации auth ДО первой навигации роутера,
+  // чтобы guard мог проверить store.currentUser синхронно
+  const store = useGameStore()
+  await store.initAuth()
+
+  app.use(router)
+  app.use(PrimeVue, { theme: { preset: Aura }, ripple: true })
+  app.use(ToastService)
+  app.directive('tooltip', Tooltip)
+
+  app.mount('#app')
+}
+
+bootstrap()

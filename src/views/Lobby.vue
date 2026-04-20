@@ -3,27 +3,25 @@ import { ref, computed, onMounted, onUnmounted } from 'vue'
 import { useRoute, useRouter } from 'vue-router'
 import { db, auth } from '../firebase'
 import {
-  doc, onSnapshot, collection, updateDoc, deleteDoc
+  doc, onSnapshot, collection, updateDoc, deleteDoc, getDoc
 } from 'firebase/firestore'
-import {
-  catastrophes, professions, healths, phobias,
-  inventories, specialCards, biology, hobbies,
-  largeInventories, facts, getRandomItem
-} from '../gameData'
+import { specialCards, getRandomItem } from '../gameData'
 
 import Button from 'primevue/button'
 import Tag    from 'primevue/tag'
 import { useToast } from 'primevue/usetoast'
 defineOptions({ name: 'LobbyView' })
+
 const route  = useRoute()
 const router = useRouter()
 const toast  = useToast()
 const roomId = route.params.id
 
-const players      = ref([])
-const isHost       = ref(false)
-const starting     = ref(false)
-const timerDuration = ref(0) // 0 = выкл
+const players       = ref([])
+const isHost        = ref(false)
+const starting      = ref(false)
+const timerDuration = ref(0)
+const selectedPack  = ref('standard') // 'standard' | 'adult'
 
 let unsubscribePlayers = null
 let unsubscribeRoom    = null
@@ -69,13 +67,17 @@ const TIMER_OPTIONS = [
   { label: '2мин', value: 120 },
 ]
 
+const PACK_OPTIONS = [
+  { label: '📦 Стандартный',  value: 'standard' },
+  { label: '🔞 18+ Взрослый', value: 'adult' },
+]
+
 const copyCode = () => {
   navigator.clipboard.writeText(roomId).then(() => {
     toast.add({ severity: 'success', summary: 'Скопировано!', detail: `Код ${roomId}`, life: 2000 })
   })
 }
 
-// Выйти: передать хоста если нужно
 const leaveRoom = async () => {
   const uid = auth.currentUser?.uid
   if (!uid) return router.push({ name: 'home' })
@@ -95,25 +97,33 @@ const leaveRoom = async () => {
   }
 }
 
-// Старт игры
 const startGame = async () => {
   if (!canStart.value) return
   starting.value = true
   try {
+    // Загружаем пак из Firestore
+    const packSnap = await getDoc(doc(db, 'packs', selectedPack.value))
+    if (!packSnap.exists()) {
+      toast.add({ severity: 'error', summary: 'Ошибка', detail: 'Пак не найден. Запустите seed-скрипт.', life: 5000 })
+      starting.value = false
+      return
+    }
+    const pack = packSnap.data()
+
     for (const player of players.value) {
       const playerRef   = doc(db, 'rooms', roomId, 'players', player.uid)
       const playerCards = {
-        profession:    { value: getRandomItem(professions),     isRevealed: false },
-        biology:       { value: getRandomItem(biology),         isRevealed: false },
-        health:        { value: getRandomItem(healths),         isRevealed: false },
-        hobby:         { value: getRandomItem(hobbies),         isRevealed: false },
-        inventory:     { value: getRandomItem(inventories),     isRevealed: false },
-        largeInventory:{ value: getRandomItem(largeInventories),isRevealed: false },
-        phobia:        { value: getRandomItem(phobias),         isRevealed: false },
-        fact1:         { value: getRandomItem(facts),           isRevealed: false },
-        fact2:         { value: getRandomItem(facts),           isRevealed: false },
-        special1:      { value: getRandomItem(specialCards),    isRevealed: false },
-        special2:      { value: getRandomItem(specialCards),    isRevealed: false },
+        profession:     { value: getRandomItem(pack.professions),     isRevealed: false },
+        biology:        { value: getRandomItem(pack.biology),         isRevealed: false },
+        health:         { value: getRandomItem(pack.healths),         isRevealed: false },
+        hobby:          { value: getRandomItem(pack.hobbies),         isRevealed: false },
+        inventory:      { value: getRandomItem(pack.inventories),     isRevealed: false },
+        largeInventory: { value: getRandomItem(pack.largeInventories),isRevealed: false },
+        phobia:         { value: getRandomItem(pack.phobias),         isRevealed: false },
+        fact1:          { value: getRandomItem(pack.facts),           isRevealed: false },
+        fact2:          { value: getRandomItem(pack.facts),           isRevealed: false },
+        special1:       { value: getRandomItem(pack.specialCards ?? specialCards), isRevealed: false },
+        special2:       { value: getRandomItem(pack.specialCards ?? specialCards), isRevealed: false },
       }
       await updateDoc(playerRef, {
         cards: playerCards,
@@ -123,9 +133,11 @@ const startGame = async () => {
         turnSkipRequestAt: null,
       })
     }
+
     await updateDoc(doc(db, 'rooms', roomId), {
       status:        'playing',
-      catastrophe:   getRandomItem(catastrophes),
+      packId:        selectedPack.value,
+      catastrophe:   getRandomItem(pack.catastrophes),
       bunkerSize:    Math.max(2, Math.floor(players.value.length / 2)),
       logs:          [],
       timerDuration: timerDuration.value,
@@ -185,6 +197,21 @@ const startGame = async () => {
     <div v-if="isHost" class="host-settings">
       <div class="settings-label">⚙️ Настройки игры</div>
 
+      <!-- Пак карт -->
+      <div class="setting-row">
+        <span class="setting-name">🃏 Пак карт</span>
+        <div class="pack-options">
+          <button
+            v-for="opt in PACK_OPTIONS" :key="opt.value"
+            class="pack-opt-btn"
+            :class="{ active: selectedPack === opt.value }"
+            @click="selectedPack = opt.value"
+          >
+            {{ opt.label }}
+          </button>
+        </div>
+      </div>
+
       <!-- Таймер хода -->
       <div class="setting-row">
         <span class="setting-name">⏱ Таймер хода</span>
@@ -221,8 +248,8 @@ const startGame = async () => {
 
 <style scoped>
 .lobby-wrapper {
-  max-width: 520px; margin: 0 auto; padding: 2rem 1.5rem;
-  min-height: 100vh; display: flex; flex-direction: column; gap: 1.5rem;
+  max-width: 520px; margin: 0 auto; padding: 1.5rem 1rem;
+  min-height: 100vh; display: flex; flex-direction: column; gap: 1.25rem;
 }
 
 .lobby-header { display:flex; align-items:flex-start; justify-content:space-between; gap:1rem; }
@@ -260,7 +287,6 @@ const startGame = async () => {
 .player-name { flex:1; font-weight:600; }
 .player-tag  { flex-shrink:0; }
 
-/* Настройки хоста */
 .host-settings {
   background:var(--color-surface); border:1px solid var(--color-border);
   border-radius:var(--radius-md); padding:1rem 1.25rem; display:flex; flex-direction:column; gap:0.75rem;
@@ -269,16 +295,37 @@ const startGame = async () => {
 .setting-row    { display:flex; align-items:center; justify-content:space-between; gap:1rem; flex-wrap:wrap; }
 .setting-name   { font-size:0.9rem; color:var(--color-text); flex-shrink:0; }
 
-.timer-options  { display:flex; gap:0.35rem; }
-.timer-opt-btn {
+.pack-options, .timer-options { display:flex; gap:0.35rem; flex-wrap:wrap; }
+.pack-opt-btn, .timer-opt-btn {
   background:#1a1a1a; border:1px solid var(--color-border); border-radius:var(--radius-sm);
   color:var(--color-muted); font-size:0.8rem; padding:0.3rem 0.6rem; cursor:pointer;
   transition:all 0.18s;
 }
-.timer-opt-btn:hover { border-color:#555; color:var(--color-text); }
-.timer-opt-btn.active { background:var(--color-accent-dim); border-color:var(--color-accent); color:var(--color-accent); font-weight:700; }
+.pack-opt-btn:hover, .timer-opt-btn:hover { border-color:#555; color:var(--color-text); }
+.pack-opt-btn.active, .timer-opt-btn.active {
+  background:var(--color-accent-dim); border-color:var(--color-accent);
+  color:var(--color-accent); font-weight:700;
+}
 
-.lobby-actions { margin-top:auto; display:flex; flex-direction:column; gap:0.5rem; }
+.lobby-actions { margin-top:auto; display:flex; flex-direction:column; gap:0.5rem; padding-top: 1rem; }
 .action-hint   { text-align:center; color:var(--color-warn); font-size:0.8rem; }
 .waiting-msg   { display:flex; align-items:center; justify-content:center; gap:0.75rem; color:var(--color-muted); font-size:1rem; padding:1rem; }
+
+/* ─── Мобильная ─── */
+@media (max-width: 600px) {
+  .lobby-wrapper    { padding: 1rem 0.75rem; gap: 1rem; }
+  .lobby-header     { flex-direction: column; align-items: stretch; gap: 0.75rem; }
+  .lobby-header h1  { font-size: 1.3rem; }
+  .code-card        { padding: 1rem; }
+  .code-value       { font-size: 1.8rem; letter-spacing: 5px; }
+  .host-settings    { padding: 0.85rem 1rem; }
+  .setting-row      { flex-direction: column; align-items: stretch; gap: 0.5rem; }
+  .setting-name     { font-size: 0.85rem; }
+  .pack-options, .timer-options { justify-content: flex-start; }
+  .pack-opt-btn, .timer-opt-btn { flex: 1; min-width: 0; padding: 0.5rem 0.3rem; font-size: 0.78rem; }
+  .player-row       { padding: 0.6rem 0.75rem; }
+  .player-avatar    { width: 30px; height: 30px; font-size: 0.9rem; }
+  .player-name      { font-size: 0.9rem; }
+  .player-tag :deep(.p-tag) { font-size: 0.7rem; padding: 0.2rem 0.45rem; }
+}
 </style>
