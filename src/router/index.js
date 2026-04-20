@@ -34,6 +34,18 @@ const router = createRouter({
       meta: { requiresAuth: true },
     },
     {
+      path: '/profile/:uid?',
+      name: 'profile',
+      component: () => import('../views/Profile.vue'),
+      meta: { requiresAuth: true },
+    },
+    {
+      path: '/lobbies',
+      name: 'lobbies',
+      component: () => import('../views/Lobbies.vue'),
+      meta: { requiresAuth: true },
+    },
+    {
       path: '/lobby/:id',
       name: 'lobby',
       component: () => import('../views/Lobby.vue'),
@@ -63,6 +75,11 @@ router.beforeEach((to) => {
 
   // Защищённый маршрут — нужна авторизация
   if (to.meta.requiresAuth && !store.currentUser) return { name: 'auth' }
+
+  // Инкогнито-пользователям профиль недоступен — аккаунт временный
+  if (to.name === 'profile' && store.currentUser?.isAnonymous) {
+    return { name: 'home' }
+  }
 
   // Никнейм не задан — отправляем в настройки (кроме самой страницы настроек)
   if (to.meta.requiresAuth && to.name !== 'settings' && !store.currentUser?.nickname) {

@@ -1,8 +1,11 @@
 <script setup>
-import { ref, computed } from 'vue'
+import { ref, computed, onMounted, onUnmounted } from 'vue'
 import { useRouter } from 'vue-router'
 import { db, auth } from '../firebase'
-import { doc, setDoc, getDoc, getDocs, collection } from 'firebase/firestore'
+import {
+  doc, setDoc, getDoc, getDocs, collection,
+  query, where, orderBy, limit, onSnapshot, serverTimestamp,
+} from 'firebase/firestore'
 import Button    from 'primevue/button'
 import InputText from 'primevue/inputtext'
 import { useToast } from 'primevue/usetoast'
@@ -17,6 +20,28 @@ const joinCode = ref('')
 const loading  = ref(false)
 
 const isLogged = computed(() => !!store.currentUser)
+
+// ─── Опции создания комнаты ─────────────────────────────────
+const newRoomName = ref('')
+const newRoomPublic = ref(false)
+
+// ─── Превью публичных лобби ─────────────────────────────────
+const publicRooms = ref([])
+let unsubPublic = null
+onMounted(() => {
+  if (!isLogged.value) return
+  const q = query(
+    collection(db, 'rooms'),
+    where('isPublic', '==', true),
+    where('status', '==', 'lobby'),
+    orderBy('createdAt', 'desc'),
+    limit(3),
+  )
+  unsubPublic = onSnapshot(q, (snap) => {
+    publicRooms.value = snap.docs.map(d => ({ id: d.id, ...d.data() }))
+  }, () => { /* index may be missing — тихо */ })
+})
+onUnmounted(() => unsubPublic?.())
 
 const generateRoomId = () => {
   const chars = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789'
@@ -49,13 +74,23 @@ const createGame = async () => {
     const user   = auth.currentUser
     const name   = store.currentUser.nickname
     const roomId = generateRoomId()
+    const roomName = newRoomName.value.trim().slice(0, 40) || `Бункер ${name}`
 
     await setDoc(doc(db, 'rooms', roomId), {
-      status: 'lobby', createdAt: new Date(),
-      hostId: user.uid, currentRound: 1,
+      status: 'lobby',
+      createdAt: serverTimestamp(),
+      hostId: user.uid,
+      hostName: name,
+      hostIsAnonymous: !!user.isAnonymous,
+      currentRound: 1,
+      isPublic: newRoomPublic.value,
+      name: roomName,
+      maxPlayers: 12,
+      playerCount: 1,
     })
     await setDoc(doc(db, 'rooms', roomId, 'players', user.uid), {
       name, isHost: true, uid: user.uid, joinedAt: new Date(),
+      isAnonymous: !!user.isAnonymous,
     })
     router.push({ name: 'lobby', params: { id: roomId } })
   } catch (e) {
@@ -64,6 +99,11 @@ const createGame = async () => {
   } finally {
     loading.value = false
   }
+}
+
+const joinPublicRoom = (roomId) => {
+  joinCode.value = roomId
+  joinGame()
 }
 
 const joinGame = async () => {
@@ -88,7 +128,10 @@ const joinGame = async () => {
     const playerRef  = doc(db, 'rooms', code, 'players', user.uid)
     const playerSnap = await getDoc(playerRef)
     if (!playerSnap.exists()) {
-      await setDoc(playerRef, { name, isHost: false, uid: user.uid, joinedAt: new Date() })
+      await setDoc(playerRef, {
+        name, isHost: false, uid: user.uid, joinedAt: new Date(),
+        isAnonymous: !!user.isAnonymous,
+      })
     }
     router.push({ name: 'lobby', params: { id: code } })
   } catch (e) {
@@ -124,15 +167,36 @@ const joinGame = async () => {
         <div class="cta-card">
           <template v-if="isLogged">
             <div class="user-row">
-              <span class="callsign">👤 {{ store.currentUser?.nickname || 'Без позывного' }}</span>
-              <button class="settings-link" @click="$router.push({ name: 'settings' })">⚙️</button>
+              <button
+                class="callsign-btn"
+                @click="$router.push({ name: store.currentUser?.isAnonymous ? 'settings' : 'profile' })"
+              >
+                <span class="user-avatar">{{ store.currentUser?.avatar || '🧍' }}</span>
+                <span class="callsign">{{ store.currentUser?.nickname || 'Без позывного' }}</span>
+                <span v-if="store.currentUser?.isAnonymous" class="anon-chip">🕶️</span>
+              </button>
+              <button class="settings-link" @click="$router.push({ name: 'settings' })" title="Настройки">⚙️</button>
             </div>
-            <Button
-              label="Создать бункер" severity="danger" class="w-full cta-main"
-              :loading="loading" icon="pi pi-plus" size="large"
-              @click="createGame"
-            />
+
+            <!-- Создание -->
+            <div class="create-block">
+              <InputText
+                v-model="newRoomName" placeholder="Название комнаты (необязательно)"
+                maxlength="40" class="w-full" :disabled="loading"
+              />
+              <label class="public-toggle">
+                <input type="checkbox" v-model="newRoomPublic" :disabled="loading" />
+                <span>🌐 Публичная — показать в списке лобби</span>
+              </label>
+              <Button
+                label="Создать бункер" severity="danger" class="w-full cta-main"
+                :loading="loading" icon="pi pi-plus" size="large"
+                @click="createGame"
+              />
+            </div>
+
             <div class="or-divider"><span>ИЛИ</span></div>
+
             <div class="join-block">
               <InputText
                 v-model="joinCode" placeholder="Код комнаты"
@@ -140,10 +204,14 @@ const joinGame = async () => {
                 maxlength="6" @keyup.enter="joinGame"
               />
               <Button
-                label="Присоединиться" severity="secondary" class="w-full"
+                label="Присоединиться по коду" severity="secondary" class="w-full"
                 :loading="loading" icon="pi pi-sign-in" @click="joinGame"
               />
             </div>
+
+            <button class="browse-link" @click="$router.push({ name: 'lobbies' })">
+              🌐 Смотреть все публичные лобби →
+            </button>
           </template>
           <template v-else>
             <p class="cta-hint">Войдите, чтобы создать комнату или присоединиться к друзьям</p>
@@ -155,6 +223,24 @@ const joinGame = async () => {
             <button class="guest-link" @click="$router.push({ name: 'rules' })">Сначала почитать правила →</button>
           </template>
         </div>
+      </div>
+    </section>
+
+    <!-- ═══ Публичные лобби (превью) ═══ -->
+    <section v-if="isLogged && publicRooms.length" class="public-preview">
+      <div class="pp-head">
+        <h2 class="section-title" style="margin:0">🌐 ОТКРЫТЫЕ ЛОББИ</h2>
+        <button class="pp-all" @click="$router.push({ name: 'lobbies' })">Все →</button>
+      </div>
+      <div class="pp-grid">
+        <article v-for="r in publicRooms" :key="r.id" class="pp-card" @click="joinPublicRoom(r.id)">
+          <div class="pp-name">{{ r.name || 'Без названия' }}</div>
+          <div class="pp-meta">
+            <span>👥 {{ r.playerCount || 0 }}/{{ r.maxPlayers || 12 }}</span>
+            <span class="pp-host">хост: {{ r.hostName || '—' }}</span>
+          </div>
+          <div class="pp-code">#{{ r.id }}</div>
+        </article>
       </div>
     </section>
 
@@ -295,12 +381,74 @@ const joinGame = async () => {
 
 .user-row {
   display: flex; align-items: center; justify-content: space-between;
-  padding: 0.6rem 0.75rem; background: var(--color-bg);
+  padding: 0.45rem 0.6rem; background: var(--color-bg);
   border-radius: var(--radius-sm); margin-bottom: 0.25rem;
 }
-.callsign      { font-weight: 600; font-size: 0.95rem; }
-.settings-link { background: none; border: none; color: var(--color-muted); font-size: 1.1rem; cursor: pointer; }
+.callsign-btn {
+  display: flex; align-items: center; gap: 0.5rem;
+  background: none; border: none; padding: 0.25rem 0.35rem;
+  color: var(--color-text); cursor: pointer;
+  border-radius: var(--radius-sm); transition: background 0.15s;
+  min-width: 0; flex: 1;
+}
+.callsign-btn:hover { background: var(--color-surface-2); }
+.user-avatar {
+  width: 28px; height: 28px; border-radius: 50%;
+  background: var(--color-accent-dim); border: 1px solid var(--color-accent);
+  display: flex; align-items: center; justify-content: center;
+  font-size: 0.95rem; flex-shrink: 0;
+}
+.callsign      { font-weight: 600; font-size: 0.95rem; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.settings-link { background: none; border: none; color: var(--color-muted); font-size: 1.1rem; cursor: pointer; padding: 0.25rem 0.5rem; }
 .settings-link:hover { color: var(--color-text); }
+
+.create-block { display: flex; flex-direction: column; gap: 0.5rem; }
+.public-toggle {
+  display: flex; align-items: center; gap: 0.5rem;
+  color: var(--color-muted); font-size: 0.85rem; cursor: pointer;
+  user-select: none; padding: 0.15rem 0;
+}
+.public-toggle input { accent-color: var(--color-accent); cursor: pointer; }
+
+.browse-link {
+  background: none; border: 1px dashed var(--color-border);
+  color: var(--color-muted); font-size: 0.85rem;
+  padding: 0.55rem; border-radius: var(--radius-sm);
+  cursor: pointer; transition: all 0.2s; margin-top: 0.25rem;
+}
+.browse-link:hover { color: var(--color-accent); border-color: var(--color-accent); }
+
+/* ─── Превью публичных лобби ─── */
+.public-preview { max-width: 1100px; margin: 0 auto; padding: 2rem 1.5rem 1rem; }
+.pp-head { display: flex; justify-content: space-between; align-items: center; margin-bottom: 1rem; }
+.pp-all {
+  background: none; border: none; color: var(--color-muted);
+  font-size: 0.85rem; cursor: pointer; font-weight: 600;
+}
+.pp-all:hover { color: var(--color-accent); }
+.pp-grid {
+  display: grid; grid-template-columns: repeat(auto-fill, minmax(240px, 1fr));
+  gap: 0.75rem;
+}
+.pp-card {
+  background: var(--color-surface);
+  border: 1px solid var(--color-border);
+  border-radius: var(--radius-md);
+  padding: 0.85rem 1rem; cursor: pointer;
+  transition: all 0.2s;
+  display: flex; flex-direction: column; gap: 0.4rem;
+}
+.pp-card:hover {
+  border-color: var(--color-accent); transform: translateY(-2px);
+  box-shadow: 0 6px 20px rgba(229,62,62,0.1);
+}
+.pp-name { font-weight: 600; color: var(--color-text); }
+.pp-meta { display: flex; justify-content: space-between; font-size: 0.8rem; color: var(--color-muted); }
+.pp-host { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; max-width: 50%; }
+.pp-code {
+  font-family: 'Russo One', monospace; font-size: 0.8rem;
+  color: var(--color-warn); letter-spacing: 2px; margin-top: 0.2rem;
+}
 
 .or-divider {
   display: flex; align-items: center; gap: 0.75rem;

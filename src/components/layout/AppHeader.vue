@@ -44,16 +44,17 @@ const isActive = (name) => route.name === name
 
       <!-- Десктопная навигация -->
       <nav class="nav-desktop">
-        <router-link :to="{ name: 'home' }"  class="nav-link" :class="{ active: isActive('home') }">Играть</router-link>
-        <router-link :to="{ name: 'rules' }" class="nav-link" :class="{ active: isActive('rules') }">Правила</router-link>
-        <router-link :to="{ name: 'about' }" class="nav-link" :class="{ active: isActive('about') }">О проекте</router-link>
+        <router-link :to="{ name: 'home' }"    class="nav-link" :class="{ active: isActive('home') }">Играть</router-link>
+        <router-link v-if="user" :to="{ name: 'lobbies' }" class="nav-link" :class="{ active: isActive('lobbies') }">🌐 Лобби</router-link>
+        <router-link :to="{ name: 'rules' }"   class="nav-link" :class="{ active: isActive('rules') }">Правила</router-link>
+        <router-link :to="{ name: 'about' }"   class="nav-link" :class="{ active: isActive('about') }">О проекте</router-link>
       </nav>
 
       <!-- Правая часть: профиль или кнопки входа -->
       <div class="header-right">
         <template v-if="user">
           <button class="profile-btn" @click="menuOpen = !menuOpen">
-            <span class="avatar">{{ initial }}</span>
+            <span class="avatar">{{ user.avatar || initial }}</span>
             <span class="profile-name">{{ user.nickname || 'Без позывного' }}</span>
             <span class="chevron" :class="{ open: menuOpen }">▾</span>
           </button>
@@ -63,6 +64,8 @@ const isActive = (name) => route.name === name
                 <span v-if="user.isAnonymous" class="anon-badge">🕶️ Инкогнито</span>
                 <span v-else class="menu-email">{{ user.email || 'Аккаунт' }}</span>
               </div>
+              <button v-if="!user.isAnonymous" class="menu-item" @click="go('profile')">👤 Мой профиль</button>
+              <button class="menu-item" @click="go('lobbies')">🌐 Публичные лобби</button>
               <button class="menu-item" @click="go('settings')">⚙️ Настройки</button>
               <button class="menu-item danger" @click="logout">🚪 Выйти</button>
             </div>
@@ -85,6 +88,8 @@ const isActive = (name) => route.name === name
       <router-link :to="{ name: 'rules' }" class="m-link" @click="mobileOpen = false">Правила</router-link>
       <router-link :to="{ name: 'about' }" class="m-link" @click="mobileOpen = false">О проекте</router-link>
       <template v-if="user">
+        <router-link v-if="!user.isAnonymous" :to="{ name: 'profile' }"  class="m-link" @click="mobileOpen = false">👤 Мой профиль</router-link>
+        <router-link :to="{ name: 'lobbies' }"  class="m-link" @click="mobileOpen = false">🌐 Публичные лобби</router-link>
         <router-link :to="{ name: 'settings' }" class="m-link" @click="mobileOpen = false">⚙️ Настройки</router-link>
         <button class="m-link m-danger" @click="logout">🚪 Выйти</button>
       </template>

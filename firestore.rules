@@ -16,41 +16,68 @@ service cloud.firestore {
         get(/databases/$(database)/documents/rooms/$(roomId)/players/$(request.auth.uid)).data.isHost == true;
     }
 
-    // Профили пользователей — только свой
+    // ═══ Профили пользователей ═══
+    // Читать профили может любой залогиненный — нужно для страницы профиля и списка друзей.
+    // Писать — только владелец.
     match /users/{userId} {
-      allow read, write: if isSignedIn() && request.auth.uid == userId;
+      allow read:   if isSignedIn();
+      allow create: if isSignedIn() && request.auth.uid == userId;
+      allow update: if isSignedIn() && request.auth.uid == userId;
+      allow delete: if false;
+
+      // Подколлекция друзей.
+      // Каждый документ — связь текущего юзера с другим, id документа = peerUid.
+      match /friends/{peerUid} {
+        // Читать — только владелец списка
+        allow read: if isSignedIn() && request.auth.uid == userId;
+
+        // Писать в свой список — свободно (принять/отклонить/удалить/отправить)
+        allow write: if isSignedIn() && request.auth.uid == userId;
+
+        // Другой юзер может создать/обновить документ в МОЁМ списке друзей,
+        // но только если docId == его uid (т.е. он добавляет себя как заявителя),
+        // и только для полей заявки (status = pending|accepted).
+        allow create: if isSignedIn()
+                      && request.auth.uid == peerUid
+                      && request.resource.data.status in ['pending'];
+        allow update: if isSignedIn()
+                      && request.auth.uid == peerUid
+                      && request.resource.data.status in ['accepted'];
+        // Удалять документ в чужом списке нельзя
+      }
+
+      // Подколлекция истории игр — пишет сам пользователь
+      match /gameHistory/{gameId} {
+        allow read:  if isSignedIn() && request.auth.uid == userId;
+        allow write: if isSignedIn() && request.auth.uid == userId;
+      }
     }
 
-    // Паки карт — читать может любой залогиненный
+    // ═══ Паки карт ═══
     match /packs/{packId} {
       allow read:  if isSignedIn();
       allow write: if false;
     }
 
-    // Комнаты
+    // ═══ Комнаты ═══
     match /rooms/{roomId} {
-      // Любой залогиненный может прочитать комнату (нужно для проверки кода при входе)
-      allow read: if isSignedIn();
+      // Любой залогиненный может читать/листать (нужно для списка публичных лобби и для входа по коду)
+      allow read, list: if isSignedIn();
 
       allow create: if isSignedIn()
         && request.resource.data.hostId == request.auth.uid;
 
-      // Обновлять может хост или участник (нужно для голосования и т.д.)
       allow update: if isRoomHost(roomId) || isRoomPlayer(roomId);
 
       allow delete: if isRoomHost(roomId);
 
-      // Игроки
       match /players/{playerId} {
-        // Читать список может любой залогиненный (нужно для проверки лимита при входе)
         allow read: if isSignedIn();
 
         allow create: if isSignedIn()
           && request.auth.uid == playerId
           && request.resource.data.uid == request.auth.uid;
 
-        // Любой участник комнаты может обновить любого игрока —
-        // нужно для спецкарт (иммунитет, вскрытие, штрафы и т.д.)
         allow update: if isRoomPlayer(roomId);
 
         allow delete: if isRoomHost(roomId) || request.auth.uid == playerId;

@@ -4,7 +4,8 @@ import { useRoute, useRouter } from 'vue-router'
 import { db, auth } from '../firebase'
 import { onAuthStateChanged } from 'firebase/auth'
 import {
-  doc, collection, onSnapshot, updateDoc, writeBatch, arrayUnion, Timestamp
+  doc, collection, onSnapshot, updateDoc, writeBatch, arrayUnion, Timestamp,
+  setDoc, increment, serverTimestamp,
 } from 'firebase/firestore'
 import {
   catastrophes, professions, healths, phobias,
@@ -175,6 +176,58 @@ onUnmounted(() => {
   clearTimeout(kickAnimTimer)
   unsubRoom?.()
   unsubPlayers?.()
+})
+
+// ─── Инкремент статистики при завершении игры ───────────────
+// Каждый клиент сам обновляет свой профиль — rules разрешают писать только в свой users/{uid}.
+// Guard isAlreadyCounted защищает от двойного инкремента при ре-рендере.
+const statsCountedFor = ref(null)  // roomId, за который уже посчитали
+
+watch(() => room.value?.status, async (newStatus, oldStatus) => {
+  if (newStatus !== 'finished' || oldStatus === 'finished') return
+  if (!myUid.value) return
+  if (statsCountedFor.value === roomId) return
+  statsCountedFor.value = roomId
+
+  // Инкогнито — статистику не ведём, аккаунт временный
+  if (auth.currentUser?.isAnonymous) return
+
+  const myPlayer = players.value.find(p => p.uid === myUid.value)
+  if (!myPlayer) return   // зритель, не считаем
+
+  const aliveUids = players.value.filter(p => p.isAlive !== false).map(p => p.uid)
+  const iAmAlive  = aliveUids.includes(myUid.value)
+
+  // Outcome:
+  //   win       — жив к концу игры
+  //   killed    — мёртв (убит спецкартой / голосованием — без разделения)
+  const outcome = iAmAlive ? 'win' : 'killed'
+
+  const patch = {
+    'stats.gamesPlayed': increment(1),
+    lastPlayedAt: serverTimestamp(),
+  }
+  if (iAmAlive) {
+    patch['stats.wins']     = increment(1)
+    patch['stats.survived'] = increment(1)
+  } else {
+    patch['stats.killed']   = increment(1)
+  }
+
+  try {
+    await updateDoc(doc(db, 'users', myUid.value), patch)
+    // Запись в историю игр
+    await setDoc(doc(db, 'users', myUid.value, 'gameHistory', roomId), {
+      roomId,
+      endedAt: serverTimestamp(),
+      outcome,
+      playerCount: players.value.length,
+      pack: room.value?.packId || 'standard',
+      catastrophe: room.value?.catastrophe?.text || room.value?.catastrophe || null,
+    })
+  } catch (e) {
+    console.warn('[stats] не удалось обновить:', e)
+  }
 })
 
 // ─── Computed ───────────────────────────────────────────────────

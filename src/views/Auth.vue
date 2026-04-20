@@ -62,7 +62,7 @@ const loginAsGuest = async () => {
     const result = await signInAnonymously(auth)
     await setDoc(doc(db, 'users', result.user.uid), {
       nickname: nick, isAnonymous: true, createdAt: new Date(),
-    })
+    }, { merge: true })
     store.currentUser = {
       uid: result.user.uid, email: null, displayName: null,
       nickname: nick, isAnonymous: true,
@@ -101,7 +101,9 @@ const registerWithEmail = async () => {
   loading.value = true
   try {
     const result = await createUserWithEmailAndPassword(auth, email.value, password.value)
-    await setDoc(doc(db, 'users', result.user.uid), { nickname: nick, createdAt: new Date() })
+    await setDoc(doc(db, 'users', result.user.uid), {
+      nickname: nick, createdAt: new Date(),
+    }, { merge: true })
     store.currentUser = {
       uid: result.user.uid, email: result.user.email, displayName: null,
       nickname: nick, isAnonymous: false,

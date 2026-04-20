@@ -1,4 +1,5 @@
 <script setup>
+import { useRouter } from 'vue-router'
 import Tag   from 'primevue/tag'
 import Panel from 'primevue/panel'
 
@@ -9,6 +10,12 @@ defineProps({
   cardLabels:    { type: Object, default: () => ({}) },
   getCardText:   { type: Function, required: true },
 })
+
+const router = useRouter()
+const openProfile = (p) => {
+  if (p.isAnonymous) return  // инкогнито профиля не имеет
+  router.push({ name: 'profile', params: { uid: p.uid } })
+}
 </script>
 
 <template>
@@ -21,6 +28,12 @@ defineProps({
       :class="{ 'panel-dead': p.isAlive === false, 'panel-active': p.uid === activePlayerId }"
     >
       <template #icons>
+        <button
+          v-if="!p.isAnonymous"
+          class="profile-link-btn"
+          v-tooltip.top="'Открыть профиль'"
+          @click="openProfile(p)"
+        >👤</button>
         <Tag v-if="p.isAlive === false"           severity="danger"  value="МЁРТВ"   class="mr-2" />
         <Tag v-else-if="p.uid === activePlayerId"  severity="success" value="ЕГО ХОД" class="mr-2" />
       </template>
@@ -47,6 +60,14 @@ defineProps({
 .info-value    { color:var(--color-success); font-weight:600; text-align:right; max-width:60%; font-size:0.85rem; word-break:break-word; }
 .info-hidden   { color:#333; font-style:italic; font-size:0.8rem; }
 .mr-2          { margin-right:0.5rem; }
+.profile-link-btn {
+  background: none; border: 1px solid transparent;
+  font-size: 1rem; cursor: pointer;
+  padding: 0.15rem 0.4rem; margin-right: 0.35rem;
+  border-radius: 4px; color: var(--color-muted);
+  transition: all 0.15s;
+}
+.profile-link-btn:hover { color: var(--color-accent); border-color: var(--color-accent); }
 
 @media (max-width: 900px) {
   .others-grid  { gap: 0.75rem; margin-bottom: 1.5rem; }
