@@ -25,3 +25,6 @@
 npm install
 npm run dev
 ```
+
+## Hosting
+https://bunker-game-58b60.web.app
